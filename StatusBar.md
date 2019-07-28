@@ -201,7 +201,7 @@ _源码版本：com.google.android.material:material:1.1.0-alpha01_
                 getWidth() - getPaddingRight() - lp.rightMargin,
                 getHeight() - getPaddingBottom() - lp.bottomMargin);
 		
-		// 在Layout子View的时候，加入了insets值的计算，当parent设置fitsSystemWindows Flag同时子View没有这个Flag，子View就没有办法Layout在这个insets内，反之就可以（也就是说可以和父View的StatusBar那个范围重合）。
+	    // 在Layout子View的时候，加入了insets值的计算，当parent设置fitsSystemWindows Flag同时子View没有这个Flag，子View就没有办法Layout在这个insets内，反之就可以（也就是说可以和父View的StatusBar那个范围重合）。
         if (mLastInsets != null && ViewCompat.getFitsSystemWindows(this)
                 && !ViewCompat.getFitsSystemWindows(child)) {
             // If we're set to handle insets but this child isn't, then it has been measured as
@@ -229,29 +229,29 @@ _源码版本：com.google.android.material:material:1.1.0-alpha01_
    ```java
 			// Line: 796
 			int childWidthMeasureSpec = widthMeasureSpec;
-            int childHeightMeasureSpec = heightMeasureSpec;
+			int childHeightMeasureSpec = heightMeasureSpec;
 			// 当父View中有fitSystemFlag而子View中没有的时候，测量子view的最大宽度和高度会减去insets中的值，反之就不会。
-            if (applyInsets && !ViewCompat.getFitsSystemWindows(child)) {
-                // We're set to handle insets but this child isn't, so we will measure the
-                // child as if there are no insets
-                final int horizInsets = mLastInsets.getSystemWindowInsetLeft()
+			if (applyInsets && !ViewCompat.getFitsSystemWindows(child)) {
+				// We're set to handle insets but this child isn't, so we will measure the
+				// child as if there are no insets
+				final int horizInsets = mLastInsets.getSystemWindowInsetLeft()
                         + mLastInsets.getSystemWindowInsetRight();
-                final int vertInsets = mLastInsets.getSystemWindowInsetTop()
+				final int vertInsets = mLastInsets.getSystemWindowInsetTop()
                         + mLastInsets.getSystemWindowInsetBottom();
 
-                childWidthMeasureSpec = MeasureSpec.makeMeasureSpec(
+				childWidthMeasureSpec = MeasureSpec.makeMeasureSpec(
                         widthSize - horizInsets, widthMode);
-                childHeightMeasureSpec = MeasureSpec.makeMeasureSpec(
+				childHeightMeasureSpec = MeasureSpec.makeMeasureSpec(
                         heightSize - vertInsets, heightMode);
-            }
+			}
 			
 			// 调用子View的Behavior去测量子View，如果Behavior没有处理就自己来测量。
-            final Behavior b = lp.getBehavior();
-            if (b == null || !b.onMeasureChild(this, child, childWidthMeasureSpec, keylineWidthUsed,
+			final Behavior b = lp.getBehavior();
+			if (b == null || !b.onMeasureChild(this, child, childWidthMeasureSpec, keylineWidthUsed,
                     childHeightMeasureSpec, 0)) {
-                onMeasureChild(child, childWidthMeasureSpec, keylineWidthUsed,
+				onMeasureChild(child, childWidthMeasureSpec, keylineWidthUsed,
                         childHeightMeasureSpec, 0);
-            }
+			}
    ```
    在测量子View的时候会根据insets来限制View的最大高度和宽度，具体参考注释。在实际测量的时候会调用Behavior来测量，如果Behavior没有测量就会自己测量，目前只有两个Behavior重写了测量子View的这个方法，一个是AppbarLayout的默认Behavior，等分析AppbarLayout的时候我们再看，另一个暂时不讨论。  
    到目前为止，感觉变得有点复杂，其中涉及到view的测量和layout，还有Behavior，感到不适的同学可以多几次前面的内容。  
