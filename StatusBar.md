@@ -171,7 +171,7 @@ _源码版本：com.google.android.material:material:1.1.0-alpha01_
    ```
    setupForInsets方法中首先判断是否有flag，如果有先添加一个insets的Listener，然后设置SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN UI Flag。在View的分析我我们讲到，但有Listener的时候就不会再调用onApplyWindowInsets方法了，也就修改了默认View对fitSystemWindow这个Flag的处理，忘了的同学可以看前面View的分析。在这个Listener中调用了setWindowInsets方法。  
    
-   setWindowInsets方法分析：
+   setWindowInsets方法分析：  
    
    ```java 
 	// Line: 366
