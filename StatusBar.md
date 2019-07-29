@@ -1,4 +1,4 @@
-﻿# 与StatusBar的爱恨情仇
+# 与StatusBar的爱恨情仇
 ---
 
 ## 1.  实现简单的透明状态栏
@@ -40,8 +40,9 @@
 _源码版本：Sources for Android 28_
 
 - View  
+
   ```Java
-	// Line: 9795  
+	// Line: 9795
 	public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
         try {
             mPrivateFlags3 |= PFLAG3_APPLYING_INSETS;
@@ -134,7 +135,7 @@ _源码版本：Sources for Android 28_
 
 _源码版本：com.google.android.material:material:1.1.0-alpha01_
 
- - CoordinatorLayout  
+- CoordinatorLayout  
   
    在CoordinatorLayout的构造函数中调用了``setupForInsets()``方法，我们先从这个方法开始分析。  
    
@@ -256,7 +257,7 @@ _源码版本：com.google.android.material:material:1.1.0-alpha01_
    在测量子View的时候会根据insets来限制View的最大高度和宽度，具体参考注释。在实际测量的时候会调用Behavior来测量，如果Behavior没有测量就会自己测量，目前只有两个Behavior重写了测量子View的这个方法，一个是AppbarLayout的默认Behavior，等分析AppbarLayout的时候我们再看，另一个暂时不讨论。  
    到目前为止，感觉变得有点复杂，其中涉及到view的测量和layout，还有Behavior，感到不适的同学可以多几次前面的内容。  
    
-  - AppBarLayout  
+- AppBarLayout  
   
     AppBarLayout和CoordinatorLayout一样也是直接在构造函数中设置了insets的Listener，覆盖了默认的onApplyWindowInsets方法，当有insets事件来的时候，会调用方法``onWindowInsetChanged``，我们也从这个方法开始分析。  
 	
