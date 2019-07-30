@@ -133,7 +133,7 @@ _源码版本：Sources for Android 28_
 # 3. 刁民CoordinatorLayout和他的一些熊孩子View对fitSystemWindows的特殊处理  
 本以为分析完View和ViewGroup就对fitSystemWindows这个属性就完了。然而被CoordinatorLayout狠狠的扇了一巴掌。  
 
-_源码版本：com.google.android.material:material:1.1.0-alpha01_
+_源码版本：com.google.android.material:material:1.1.0-alpha06_
 
 - CoordinatorLayout  
   
@@ -254,7 +254,7 @@ _源码版本：com.google.android.material:material:1.1.0-alpha01_
                         childHeightMeasureSpec, 0);
 			}
    ```
-   在测量子View的时候会根据insets来限制View的最大高度和宽度，具体参考注释。在实际测量的时候会调用Behavior来测量，如果Behavior没有测量就会自己测量，目前只有两个Behavior重写了测量子View的这个方法，一个是AppbarLayout的默认Behavior，等分析AppbarLayout的时候我们再看，另一个暂时不讨论。  
+   在测量子View的时候会根据insets来限制View的最大高度和宽度，具体参考注释。在实际测量的时候会调用Behavior来测量，如果Behavior没有测量就会自己测量，目前只有两个Behavior重写了测量子View的这个方法，一个是AppbarLayout的默认Behavior，等分析AppbarLayout的时候我们再看，另一个暂时不讨论。(在onLayout方法中也会调用Behavior的onLayoutChild方法，在AppbarLayout的Behavior中还是会调用上面分析到的layoutChild方法进行layout，除此之外，还会做一些其他的操作，我也没太看懂)  
    到目前为止，感觉变得有点复杂，其中涉及到view的测量和layout，还有Behavior，感到不适的同学可以多几次前面的内容。  
    
 - AppBarLayout  
@@ -280,7 +280,80 @@ _源码版本：com.google.android.material:material:1.1.0-alpha01_
 	}
 	```
 	
-	onWindowInsetChanged方法中，如果设置了fitWindows Flag，就会吧insets保存在成员变量lastInsets中，然后requestLayout，CoordinatorLayout也干了这两件事，也没有消耗这个insets，不同的是，在AppbarLayout中并没有用这个insets去计算和测量。可以通过``getTopInset()``方法获取到这个topInset值，也就是StatusBar的高度。
+	onWindowInsetChanged方法中，如果设置了fitWindows Flag，就会吧insets保存在成员变量lastInsets中，然后requestLayout，CoordinatorLayout也干了这两件事，也没有消耗这个insets。可以通过``getTopInset()``方法获取到这个topInset值，也就是StatusBar的高度。  
+	现在我们接着分析上面提到的AppbarLayout默认Behavior中的onMeasureChild()方法：  
+	
+	```java
+	// Line: 1456
+	@Override
+    public boolean onMeasureChild(
+        CoordinatorLayout parent,
+        T child,
+        int parentWidthMeasureSpec,
+        int widthUsed,
+        int parentHeightMeasureSpec,
+        int heightUsed) {
+      final CoordinatorLayout.LayoutParams lp =
+          (CoordinatorLayout.LayoutParams) child.getLayoutParams();
+      if (lp.height == CoordinatorLayout.LayoutParams.WRAP_CONTENT) {
+        // If the view is set to wrap on it's height, CoordinatorLayout by default will
+        // cap the view at the CoL's height. Since the AppBarLayout can scroll, this isn't
+        // what we actually want, so we measure it ourselves with an unspecified spec to
+        // allow the child to be larger than it's parent
+        parent.onMeasureChild(
+            child,
+            parentWidthMeasureSpec,
+            widthUsed,
+            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+            heightUsed);
+        return true;
+      }
+
+      // Let the parent handle it as normal
+      return super.onMeasureChild(
+          parent, child, parentWidthMeasureSpec, widthUsed, parentHeightMeasureSpec, heightUsed);
+    }
+	```  
+	当AppbarLayout的高度是WRAP LAYOUT的时候，就会调用CooradinatorLayout的onMeasureChild方法，同时将WRAP LAYOUT对应的MeasureSpec设置成UNSPECIFIED。其他情况就会调用通用的测量（主要是没有设置成UNSPECIFIED）。  
+	在CooradinatorLayout的onMeasureChild方法中最后也会调用子View的measure方法，现在我们来分析一下AppbarLayout的onMeasure方法。  
+	
+	```java
+	// Line: 418
+	@Override
+  protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+    super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+
+    // If we're set to handle system windows but our first child is not, we need to add some
+    // height to ourselves to pad the first child down below the status bar
+    final int heightMode = MeasureSpec.getMode(heightMeasureSpec);
+    if (heightMode != MeasureSpec.EXACTLY
+        && ViewCompat.getFitsSystemWindows(this)
+        && shouldOffsetFirstChild()) {
+      int newHeight = getMeasuredHeight();
+      switch (heightMode) {
+        case MeasureSpec.AT_MOST:
+          // For AT_MOST, we need to clamp our desired height with the max height
+          newHeight =
+              MathUtils.clamp(
+                  getMeasuredHeight() + getTopInset(), 0, MeasureSpec.getSize(heightMeasureSpec));
+          break;
+        case MeasureSpec.UNSPECIFIED:
+          // For UNSPECIFIED we can use any height so just add the top inset
+          newHeight += getTopInset(); // 添加topInsets
+          break;
+        default: // fall out
+      }
+      setMeasuredDimension(getMeasuredWidth(), newHeight);
+    }
+
+    invalidateScrollRanges();
+  }
+	
+	```
+	在onMeasure方法中对应MeasureSpec的UNSPECIFIED时会在高度额外添加topInset，也对应了上面讲到的，在AppbarLayout的Behavior的onMeasureChild方法中会将WRAP CONTENT的MeasureSpec设置成UNSPECIFIED。  
+	小总结一下：在设置了windowTranslucentStatus为true的条件下，当CoordinatorLayout的fitSystemWindow的flag为true其子View为false的时候，measure Child的时候会限制子View的最大尺寸不会超过本身的尺寸再减去insets，在layout child的时候不允许出现在insets范围内，其他的情况不会有这两个限制。当AppbarLayout中有fitSystemWindow flag时，会在测量的时候会在高度额外添加一个topInset。   
+	
+	
    
    
    
