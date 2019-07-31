@@ -371,7 +371,71 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
 	flag时，会在测量的时候会在高度额外添加一个topInset。   
 	
 	
+- Toolbar  
+
+	在Toolbar中并没有对fitSystemWindows作出特殊的处理，是默认ViewGroup的默认处理方式。但是Toolbar中有一些特殊的逻辑会影响到fitSystemWindows的表现。  
 	
+	1. 当Toolbar的高度小于最小的建议高度时会设置这个建议的最小高度  
+		
+		Toolbar onMeasure方法片段分析：  
+		
+		```java
+		// Line: 1808
+		// Measurement already took padding into account for available space for the children,
+        // add it in for the final size.
+        width += getPaddingLeft() + getPaddingRight();
+        height += getPaddingTop() + getPaddingBottom();
+
+        final int measuredWidth = View.resolveSizeAndState(
+                Math.max(width, getSuggestedMinimumWidth()),
+                widthMeasureSpec, childState & View.MEASURED_STATE_MASK);
+        final int measuredHeight = View.resolveSizeAndState(
+                Math.max(height, getSuggestedMinimumHeight()), //当测量的高度小于建议的高度时，会使用建议的高度。  
+                heightMeasureSpec, childState << View.MEASURED_HEIGHT_STATE_SHIFT);
+
+        setMeasuredDimension(measuredWidth, shouldCollapse() ? 0 : measuredHeight);
+		
+		```  
+		
+		View.reolveSizeAndState方法分析： 
+		
+		```java
+		//Line: 23328
+		public static int resolveSizeAndState(int size, int measureSpec, int childMeasuredState) {
+        final int specMode = MeasureSpec.getMode(measureSpec);
+        final int specSize = MeasureSpec.getSize(measureSpec);
+        final int result;
+        switch (specMode) {
+            case MeasureSpec.AT_MOST: // wrap content
+                if (specSize < size) {
+                    result = specSize | MEASURED_STATE_TOO_SMALL;
+                } else {
+                    result = size;
+                }
+                break;
+            case MeasureSpec.EXACTLY: // 对应match parent和指定尺寸
+                result = specSize;
+                break;
+            case MeasureSpec.UNSPECIFIED: // 某些特殊的view会制定这个Spec，子View需要多大尺寸，就给多大尺寸。
+            default:
+                result = size;
+        }
+        return result | (childMeasuredState & MEASURED_STATE_MASK);
+    }
+		
+		```
+		
+		
+		
+		上面的height和width如果是自定的wrap content就会通过测量子view的高度和宽度依次叠加，然后和建议的尺寸来进行比较，如果小于建议尺寸就会使用建议的尺寸。建议的高度大概是56dp。如果是match parent和指定尺寸，就不会有这个建议尺寸的限制，具体看resolveSizeAndState方法中的代码和注释。介于Toolbar的这个特性就会对fitSystemWindows产生影响，在前面讲过默认的View处理fitSystemWindows就是给当前View添加一个Status高度的paddingTop，因为在Toolbar中的wrap content模式时使用了一个建议固定高度，当添加padding后其子View的显示空间就减少了StatusBar高度，就会导致子view的显示位置靠下。    
+	
+	2. 无法通过xml给Toolbar的子View设置fitSystemWindows Flag  
+	
+		当在Activity中的Theme中设置了fitSystemWindowsFlag时，如果没有手动指定，该Activity中的View也会使用这个Theme，在这种情况下如果Toolbar的fitSystemWindowsFlag手动设置为false，这时他的子View会去消耗这个insets，会导致子View设置一个padding值从而内容显示靠下。   
+	
+		
+		
+		
 	
    
    
