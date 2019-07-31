@@ -402,27 +402,26 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
 		```java
 		//Line: 23328
 		public static int resolveSizeAndState(int size, int measureSpec, int childMeasuredState) {
-        final int specMode = MeasureSpec.getMode(measureSpec);
-        final int specSize = MeasureSpec.getSize(measureSpec);
-        final int result;
-        switch (specMode) {
-            case MeasureSpec.AT_MOST: // wrap content
-                if (specSize < size) {
+			final int specMode = MeasureSpec.getMode(measureSpec);
+			final int specSize = MeasureSpec.getSize(measureSpec);
+			final int result;
+			switch (specMode) {
+				case MeasureSpec.AT_MOST: // wrap content
+					if (specSize < size) {
                     result = specSize | MEASURED_STATE_TOO_SMALL;
                 } else {
                     result = size;
                 }
                 break;
-            case MeasureSpec.EXACTLY: // 对应match parent和指定尺寸
-                result = specSize;
-                break;
-            case MeasureSpec.UNSPECIFIED: // 某些特殊的view会制定这个Spec，子View需要多大尺寸，就给多大尺寸。
-            default:
-                result = size;
-        }
-        return result | (childMeasuredState & MEASURED_STATE_MASK);
-    }
-		
+				case MeasureSpec.EXACTLY: // 对应match parent和指定尺寸
+					result = specSize;
+					break;
+				case MeasureSpec.UNSPECIFIED: // 某些特殊的view会制定这个Spec，子View需要多大尺寸，就给多大尺寸。
+				default:
+					result = size;
+			}
+			return result | (childMeasuredState & MEASURED_STATE_MASK);
+		}
 		```
 		
 		
@@ -431,10 +430,93 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
 	
 	2. 无法通过xml给Toolbar的子View设置fitSystemWindows Flag  
 	
-		当在Activity中的Theme中设置了fitSystemWindowsFlag时，如果没有手动指定，该Activity中的View也会使用这个Theme，在这种情况下如果Toolbar的fitSystemWindowsFlag手动设置为false，这时他的子View会去消耗这个insets，会导致子View设置一个padding值从而内容显示靠下。   
+		当在Activity中的Theme中设置了fitSystemWindowsFlag时，如果没有手动指定，该Activity中的View也会使用这个Theme，在这种情况下如果Toolbar的fitSystemWindowsFlag手动设置为false，这时他的子View会去消耗这个insets，会导致子View设置一个padding值从而内容显示靠下。 
+
+
+- CollapsingToolbarLayout
+
+	CollapsingToolbarLayout和AppbarLayout，CoordinateLayout一样，也在构造函数中添加了onApplyWindows这个Listener，处理的方法是onWindowInsetChanged。  
 	
+	
+	onWindowInsetChanged方法解析  
+	
+	```java
+	// Line: 278
+	WindowInsetsCompat onWindowInsetChanged(final WindowInsetsCompat insets) {
+    WindowInsetsCompat newInsets = null;
+
+    if (ViewCompat.getFitsSystemWindows(this)) {
+      // If we're set to fit system windows, keep the insets
+      newInsets = insets;
+    }
+
+    // If our insets have changed, keep them and invalidate the scroll ranges...
+    if (!ObjectsCompat.equals(lastInsets, newInsets)) {
+      lastInsets = newInsets;
+      requestLayout();
+    }
+
+    // Consume the insets. This is done so that child views with fitSystemWindows=true do not
+    // get the default padding functionality from View
+    return insets.consumeSystemWindowInsets(); // 消费了这个insets，这是和AppbarLayout不同的地方。  
+  }
+	
+	```
 		
-		
+	都是熟悉的套路，不过多讲解了，和AppbarLayout不同的是消费这个insets。  
+
+
+	onMeasure方法分析：  
+	
+	```java
+	
+	// Line: 418
+	@Override
+	protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+		ensureToolbar();
+		super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+
+		final int mode = MeasureSpec.getMode(heightMeasureSpec);
+		final int topInset = lastInsets != null ? lastInsets.getSystemWindowInsetTop() : 0;
+		// 当height设置为wrap content，同时topInset大于0的时候会给当前测量的高度再加一个topInset，同时MeasureSpec为EXACTLY
+		if (mode == MeasureSpec.UNSPECIFIED && topInset > 0) {
+		// If we have a top inset and we're set to wrap_content height we need to make sure
+		// we add the top inset to our height, therefore we re-measure
+		heightMeasureSpec =
+			MeasureSpec.makeMeasureSpec(getMeasuredHeight() + topInset, MeasureSpec.EXACTLY);
+		super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+		}
+	}
+	
+	```
+	
+	onLayout方法片段分析： 
+	
+	```java
+	
+	// Line：435
+	super.onLayout(changed, left, top, right, bottom); //先调用FramLayout的onLayout方法对子View Layout
+
+	if (lastInsets != null) {
+      // Shift down any views which are not set to fit system windows
+      final int insetTop = lastInsets.getSystemWindowInsetTop();
+      for (int i = 0, z = getChildCount(); i < z; i++) {
+        final View child = getChildAt(i);
+		// 当子view没有fit System Window flag 同时子View的top小于insetsTop时就会给子View添加一个insetTop大小的offset。
+        if (!ViewCompat.getFitsSystemWindows(child)) {
+          if (child.getTop() < insetTop) {
+            // If the child isn't set to fit system windows but is drawing within
+            // the inset offset it down
+            ViewCompat.offsetTopAndBottom(child, insetTop);
+          }
+        }
+      }
+    }
+	
+	
+	```
+	
+	小结：CollapsingToolbarLayout如果height是wrap content同时有fitwindow flag时会在测量的时候额外添加一个topInsets的高度。在layout 子View的时候，如果子View没有fitsSystemWindows flag 同时top值小于当前的topInsets，就会给子View在垂直方向上添加一个topInsets大小的offset。 CollapsingToolbarLayout是会消费insets事件的，在子view中是收不到这个事件的。  
 		
 	
    
