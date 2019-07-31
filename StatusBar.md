@@ -351,7 +351,26 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
 	
 	```
 	在onMeasure方法中对应MeasureSpec的UNSPECIFIED时会在高度额外添加topInset，也对应了上面讲到的，在AppbarLayout的Behavior的onMeasureChild方法中会将WRAP CONTENT的MeasureSpec设置成UNSPECIFIED。  
-	小总结一下：在设置了windowTranslucentStatus为true的条件下，当CoordinatorLayout的fitSystemWindow的flag为true其子View为false的时候，measure Child的时候会限制子View的最大尺寸不会超过本身的尺寸再减去insets，在layout child的时候不允许出现在insets范围内，其他的情况不会有这两个限制。当AppbarLayout中有fitSystemWindow flag时，会在测量的时候会在高度额外添加一个topInset。   
+	
+	onLayout方法代码片段: 
+	
+	```java
+	//Line：452
+	// 当有fit window flag 并且满足shouldOffsetFirstChild条件时会给第一个子View添加一个topInset的offset。
+	if (ViewCompat.getFitsSystemWindows(this) && shouldOffsetFirstChild()) {
+      // If we need to offset the first child, we need to offset all of them to make space
+      final int topInset = getTopInset();
+      for (int z = getChildCount() - 1; z >= 0; z--) {
+        ViewCompat.offsetTopAndBottom(getChildAt(z), topInset);
+      }
+    }
+	
+	```
+	判断flag，如果满足条件会给child添加一个topInset大小的offset值。shoulOffsetFirstChild方法中判断了第一个子view可见性不为gone同时没有设置fitsSystemWindows Flag。``firstChild.getVisibility() != GONE && !ViewCompat.getFitsSystemWindows(firstChild);``  
+	小结一下：在设置了windowTranslucentStatus为true的条件下，当CoordinatorLayout的fitSystemWindow的flag为true其子View为false的时候，measure Child的时候会限制子View的最大尺寸不会超过本身的尺寸再减去insets，在layout child的时候不允许出现在insets范围内，其他的情况不会有这两个限制。当AppbarLayout中有fitSystemWindow
+	flag时，会在测量的时候会在高度额外添加一个topInset。   
+	
+	
 	
 	
    
