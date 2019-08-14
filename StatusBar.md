@@ -128,9 +128,9 @@ _源码版本：Sources for Android 28_
     }
   ```
   ViewGroup中首先调用自己的dispatchApplyWindowInsets方法，如果自己消费了该insets就不会下发给子view，反之下发给子view。这里和View的触摸事件不太一样，触摸事件是当没有子view处理的时候父view才会自己处理。  
-  
-  
-# 3. 刁民CoordinatorLayout和他的一些熊孩子View对fitSystemWindows的特殊处理  
+
+## 3. 刁民CoordinatorLayout和他的一些熊孩子View对fitSystemWindows的特殊处理   
+
 本以为分析完View和ViewGroup就对fitSystemWindows这个属性就完了。然而被CoordinatorLayout狠狠的扇了一巴掌。  
 
 _源码版本：com.google.android.material:material:1.1.0-alpha06_
@@ -314,6 +314,7 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
           parent, child, parentWidthMeasureSpec, widthUsed, parentHeightMeasureSpec, heightUsed);
     }
 	```  
+	
 	当AppbarLayout的高度是WRAP LAYOUT的时候，就会调用CooradinatorLayout的onMeasureChild方法，同时将WRAP LAYOUT对应的MeasureSpec设置成UNSPECIFIED。其他情况就会调用通用的测量（主要是没有设置成UNSPECIFIED）。  
 	在CooradinatorLayout的onMeasureChild方法中最后也会调用子View的measure方法，现在我们来分析一下AppbarLayout的onMeasure方法。  
 	
@@ -433,9 +434,8 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
 		当在Activity中的Theme中设置了fitSystemWindowsFlag时，如果没有手动指定，该Activity中的View也会使用这个Theme，在这种情况下如果Toolbar的fitSystemWindowsFlag手动设置为false，这时他的子View会去消耗这个insets，会导致子View设置一个padding值从而内容显示靠下。 
 
 
-- CollapsingToolbarLayout
-
-	CollapsingToolbarLayout和AppbarLayout，CoordinateLayout一样，也在构造函数中添加了onApplyWindows这个Listener，处理的方法是onWindowInsetChanged。  
+- CollapsingToolbarLayout  
+CollapsingToolbarLayout和AppbarLayout，CoordinateLayout一样，也在构造函数中添加了onApplyWindows这个Listener，处理的方法是onWindowInsetChanged。  
 	
 	
 	onWindowInsetChanged方法解析  
@@ -460,16 +460,11 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
     // get the default padding functionality from View
     return insets.consumeSystemWindowInsets(); // 消费了这个insets，这是和AppbarLayout不同的地方。  
   }
-	
-	```
-		
-	都是熟悉的套路，不过多讲解了，和AppbarLayout不同的是消费这个insets。  
-
-
-	onMeasure方法分析：  
+```		
+都是熟悉的套路，不过多讲解了，和AppbarLayout不同的是消费这个insets。  
+onMeasure方法分析:
 	
 	```java
-	
 	// Line: 418
 	@Override
 	protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
@@ -487,16 +482,13 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
 		super.onMeasure(widthMeasureSpec, heightMeasureSpec);
 		}
 	}
-	
-	```
+```
 	
 	onLayout方法片段分析： 
 	
 	```java
-	
 	// Line：435
 	super.onLayout(changed, left, top, right, bottom); //先调用FramLayout的onLayout方法对子View Layout
-
 	if (lastInsets != null) {
       // Shift down any views which are not set to fit system windows
       final int insetTop = lastInsets.getSystemWindowInsetTop();
@@ -512,19 +504,9 @@ _源码版本：com.google.android.material:material:1.1.0-alpha06_
         }
       }
     }
-	
-	
-	```
+	```  
 	
 	小结：CollapsingToolbarLayout如果height是wrap content同时有fitwindow flag时会在测量的时候额外添加一个topInsets的高度。在layout 子View的时候，如果子View没有fitsSystemWindows flag 同时top值小于当前的topInsets，就会给子View在垂直方向上添加一个topInsets大小的offset。 CollapsingToolbarLayout是会消费insets事件的，在子view中是收不到这个事件的。  
 		
 	
-   
-   
-   
-   
-
-
-
-
-
+  
