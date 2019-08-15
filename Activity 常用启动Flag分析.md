@@ -110,5 +110,17 @@ That “document” could actually be a document, in a text editor. But it could
 
   如果启动的Activity是task的Root Activity，那么该task不会保存在recent tasks中。  
   
-
   
+### FLAG\_ACTIVITY\_RESET\_TASK\_IF\_NEEDED
+  
+  该Flag单独使用没有效果，需要和FLAG\_ACTIVITY\_NEW\_TASK结合使用。结合使用时，如果没有task有对应的目标Activity的实例，就会创建一个新的task来容纳该Activity；如果目标Activity在当前的task有目标Activity实例则没有效果；如果在其他的task有目标Activity的实例，就会切换到目标task。（注意：仅仅是切换task，而不会有Activity的创建和finish）
+  
+  
+### FLAG\_ACTIVITY\_TASK\_ON\_HOME
+
+  该Flag单独使用没有效果，需要结合FLAG\_ACTIVITY\_NEW\_TASK或者FLAG\_ACTIVITY\_NEW\_DOCUMENT一起使用。使用该Flag移动到另外一个task后，在那个task中的Activity全部结束后直接返回HOME。例如TaskA中的栈为A->B->C，当在C中使用该Flag在TaskB中启动D。 这时D finish后不会返回TaskA，而是直接返回HOME。  
+  
+  
+### 小结
+  
+  还有一些Flag没有分析，有些是已经弃用了，有新的Flag可以代替；有些在官方文档中明确大部分时候是系统使用的Flag；还有一些我也没搞清楚怎么用。但是以上的Flag可以满足绝大部分的使用场景。而且这些Flag还是可以相互组合使用的，你需要做的就是发挥你的想象力，完成一些奇特的效果。  
