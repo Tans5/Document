@@ -272,12 +272,16 @@ static class AnchorInfo {
 		
 		// 这个方法是个空实现，在GridLayoutManager中有实现这个方法，然后我们写的LayoutManager没办法实现这个方法，可见性是internal的。
         onAnchorReady(recycler, state, mAnchorInfo, firstLayoutDirection);
+        
+        // 如果上次的Layout的children没被remove同时没有失效同时没有statableIds（在adapter中可以设置stableIds）就会被直接remove掉然后被recycler回收，反之就会直接放到recycler中的scapeList中，和上面谈到的LayoutStateList中是一样的list。
         detachAndScrapAttachedViews(recycler);
         mLayoutState.mInfinite = resolveIsInfinite();
         mLayoutState.mIsPreLayout = state.isPreLayout();
         // noRecycleSpace not needed: recycling doesn't happen in below's fill
         // invocations because mScrollingOffset is set to SCROLLING_OFFSET_NaN
         mLayoutState.mNoRecycleSpace = 0;
+        
+        // layout过程也分为了两种情况 Start和End，我们只分析End的这种情况，都大同小异。
         if (mAnchorInfo.mLayoutFromEnd) {
             // fill towards start
             updateLayoutStateToFillStart(mAnchorInfo);
@@ -305,21 +309,29 @@ static class AnchorInfo {
             }
         } else {
             // fill towards end
+            // 首先会向end方向通过anchorInfo更新LayoutState
             updateLayoutStateToFillEnd(mAnchorInfo);
+            // 同时加上extraEnd的值
             mLayoutState.mExtraFillSpace = extraForEnd;
+            // 根据Layout State Layout子View，详细代码后面再分析。
             fill(recycler, mLayoutState, state, false);
             endOffset = mLayoutState.mOffset;
             final int lastElement = mLayoutState.mCurrentPosition;
+            
+            // 如果还有剩余的空间，会加到extraStart中。
             if (mLayoutState.mAvailable > 0) {
                 extraForStart += mLayoutState.mAvailable;
             }
             // fill towards start
+            
+            // 下面还会向Start方向Layout child，代码和Layout End也基本一样，只是方向不同了而已。
             updateLayoutStateToFillStart(mAnchorInfo);
             mLayoutState.mExtraFillSpace = extraForStart;
             mLayoutState.mCurrentPosition += mLayoutState.mItemDirection;
             fill(recycler, mLayoutState, state, false);
             startOffset = mLayoutState.mOffset;
-
+				
+			// 如果在Start方向上还有可用的空间，就会继续在end方向上把这个空间上继续layout children
             if (mLayoutState.mAvailable > 0) {
                 extraForEnd = mLayoutState.mAvailable;
                 // start could not consume all it should. add more items towards end
@@ -333,6 +345,14 @@ static class AnchorInfo {
         // changes may cause gaps on the UI, try to fix them.
         // TODO we can probably avoid this if neither stackFromEnd/reverseLayout/RTL values have
         // changed
+        
+        /**
+          * 这部分代码也非常重要，我之前就忽略了这部分代码，导致在第一个item remove的时候会导致被remove的子View 的空白无
+          * 法填充。还有一种情况可能会导致问题，就是在上面分析过的layout过程，End方向：如果fillStart后依然还有空白的空间，
+          * 那么就说明已经没有子View可以填充了，但是这个时候start方向上的available大于0，那么呈现出的UI就是在Start方向上
+          * 有一段多余的空白。下面这段代码就是为了处理这个问题，其实就是调用了和滚动一样的代码来处理了这段空白，分析滚动的时候
+          * 再分析。
+          */
         if (getChildCount() > 0) {
             // because layout from end may be changed by scroll to position
             // we re-calculate it.
@@ -353,8 +373,20 @@ static class AnchorInfo {
                 endOffset += fixOffset;
             }
         }
+        
+        /**
+          * 看这个方法名字就知道和动画有关，该方法只有在支持PredictiveAnimations且不是preLayout且itemCount不为零才会执
+          * 行，上面讲到的LayoutState中的scrapList也只有在这个方法里有写入值。
+          * 在我分析的场景中也只是在某个Item中的信息改变后触发了相关逻辑，而且这个layout也直接是将scrapList中的item（这个
+          * item并不是改变的那个item，而是在Layout的方向上最后一个可见的item的下一个item）直接添
+          * 加到了RecyclerView的viewInfoStore中，如果有看前面分析RecyclerView layout流程的同学应该知道，这里是存放需
+          * 要执行动画的地方，但是我经过debug发现，item改变执行动画时，直接将这个多余的Item给Remove掉了。后面分析的时候再
+          * 仔细说说这个情况，和其中的好几个过程都有关。
+          */
         layoutForPredictiveAnimations(recycler, state, startOffset, endOffset);
+        
         if (!state.isPreLayout()) {
+        	// 这个方法一定要记得调用一下。
             mOrientationHelper.onLayoutComplete();
         } else {
             mAnchorInfo.reset();
@@ -366,3 +398,384 @@ static class AnchorInfo {
     }
 
 ```
+
+onLayoutChildren代码确实有点长了，代码相对也比较复杂，通过一次就将代码阅读懂难度还是比较大的，我反正读了很多次，如果头脑还有点晕眩，推荐再多看几次，然后再进行后面的内容，跳过layoutForPredictiveAnimations这个方法也是可以的，对整个layout流程影响不大。  
+
+现在继续分析通过penddingState或者子View更新AnchorInfo的代码，方法为updateAnchorInfoForLayout。
+
+```java
+
+    private void updateAnchorInfoForLayout(RecyclerView.Recycler recycler, RecyclerView.State state,
+            AnchorInfo anchorInfo) {
+            
+        // 从pengdingData中更新Anchor，这部分代码就不仔细分析了。
+        if (updateAnchorFromPendingData(state, anchorInfo)) {
+            if (DEBUG) {
+                Log.d(TAG, "updated anchor info from pending information");
+            }
+            return;
+        }
+		 // 从上次layout的信息更新Anchor。
+        if (updateAnchorFromChildren(recycler, state, anchorInfo)) {
+            if (DEBUG) {
+                Log.d(TAG, "updated anchor info from existing children");
+            }
+            return;
+        }
+        if (DEBUG) {
+            Log.d(TAG, "deciding anchor info for fresh state");
+        }
+        
+        // 如果从layout和pendingData中都没有办法更新，那就只有从RecyclerView的初始位置作为coordinate，第一个item作为position（取决于方向）了
+        anchorInfo.assignCoordinateFromPadding();
+        anchorInfo.mPosition = mStackFromEnd ? state.getItemCount() - 1 : 0;
+    }
+    
+   /**
+     * Finds an anchor child from existing Views. Most of the time, this is the view closest to
+     * start or end that has a valid position (e.g. not removed).
+     * <p>
+     * If a child has focus, it is given priority.
+     */
+    private boolean updateAnchorFromChildren(RecyclerView.Recycler recycler,
+            RecyclerView.State state, AnchorInfo anchorInfo) {
+        if (getChildCount() == 0) {
+            return false;
+        }
+        
+        // 首先检查是否有focused的Child，如果有focused的Child就会以它为基准。
+        final View focused = getFocusedChild();
+        if (focused != null && anchorInfo.isViewValidAsAnchor(focused, state)) {
+        	  //这个方法里面大部分时候也会调用assignFromView方法，等下也直接分析那个方法。
+            anchorInfo.assignFromViewAndKeepVisibleRect(focused, getPosition(focused));
+            return true;
+        }
+        if (mLastStackFromEnd != mStackFromEnd) {
+            return false;
+        }
+        
+        // 如果layout方向是End，就会以第一个可见的子View作为基准
+        View referenceChild = anchorInfo.mLayoutFromEnd
+                ? findReferenceChildClosestToEnd(recycler, state)
+                : findReferenceChildClosestToStart(recycler, state);
+        if (referenceChild != null) {
+        	  // 根据view中的信息更新anchorInfo
+            anchorInfo.assignFromView(referenceChild, getPosition(referenceChild));
+            
+            // If all visible views are removed in 1 pass, reference child might be out of bounds.
+            // If that is the case, offset it back to 0 so that we use these pre-layout children.
+            // 下面的代码不清楚是要处理哪种特殊情况，先跳过。
+            if (!state.isPreLayout() && supportsPredictiveItemAnimations()) {
+                // validate this child is at least partially visible. if not, offset it to start
+                final boolean notVisible =
+                        mOrientationHelper.getDecoratedStart(referenceChild) >= mOrientationHelper
+                                .getEndAfterPadding()
+                                || mOrientationHelper.getDecoratedEnd(referenceChild)
+                                < mOrientationHelper.getStartAfterPadding();
+                if (notVisible) {
+                    anchorInfo.mCoordinate = anchorInfo.mLayoutFromEnd
+                            ? mOrientationHelper.getEndAfterPadding()
+                            : mOrientationHelper.getStartAfterPadding();
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+		
+		/**
+		  * 这个代码非常简单，没有太多要说的。
+		  */
+        public void assignFromView(View child, int position) {
+            if (mLayoutFromEnd) {
+                mCoordinate = mOrientationHelper.getDecoratedEnd(child)
+                        + mOrientationHelper.getTotalSpaceChange();
+            } else {
+                mCoordinate = mOrientationHelper.getDecoratedStart(child);
+            }
+
+            mPosition = position;
+        }
+
+
+```
+
+上面分析的更新ancorInfo的代码相对还是比较简单，还有一些方法没有分析，读者可以自己分析，难度也没有特别的大。
+
+extra值的计算分析我就跳过了，在有targetScrollPosition的时候那个会根据滚动的方向在start或者end添加一个RecyclerView内容大小的一个extra值，这段逻辑你是可以自己重写的，代码也比较简单。  
+
+在进行真实的layout之前，会先把上次的layout数据清空掉，而实现这个功能的方法就是detachAndScrapAttachedViews方法。
+
+```java
+
+        /**
+         * Temporarily detach and scrap all currently attached child views. Views will be scrapped
+         * into the given Recycler. The Recycler may prefer to reuse scrap views before
+         * other views that were previously recycled.
+         *
+         * @param recycler Recycler to scrap views into
+         */
+        public void detachAndScrapAttachedViews(@NonNull Recycler recycler) {
+            final int childCount = getChildCount();
+            // 遍历所有的子View然后调用scrapOrRecycleView方法。
+            for (int i = childCount - 1; i >= 0; i--) {
+                final View v = getChildAt(i);
+                scrapOrRecycleView(recycler, i, v);
+            }
+        }
+
+        private void scrapOrRecycleView(Recycler recycler, int index, View view) {
+            final ViewHolder viewHolder = getChildViewHolderInt(view);
+            if (viewHolder.shouldIgnore()) {
+                if (DEBUG) {
+                    Log.d(TAG, "ignoring view " + viewHolder);
+                }
+                return;
+            }
+            // 根据条件可能会被直接remove掉然后被recycler回收，或者被detach然后添加到scrapList中。大部分时间都是会被添加到scrapList中，我们分析Recycler的时候还要分析内部具体的实现。
+            if (viewHolder.isInvalid() && !viewHolder.isRemoved()
+                    && !mRecyclerView.mAdapter.hasStableIds()) {
+                removeViewAt(index);
+                recycler.recycleViewHolderInternal(viewHolder);
+            } else {
+                detachViewAt(index);
+                recycler.scrapView(view);
+                mRecyclerView.mViewInfoStore.onViewDetached(viewHolder);
+            }
+        }
+
+```
+
+detachAndScrapAttachedViews的处理方式也非常简单，主要逻辑都是recycler担当的，暂时先不分析内部。  
+
+
+现在分析根据AnchorInfo更新LayoutState的相关代码，一共有两个方法分别是updateLayoutStateToFillStart和updateLayoutStateToFillEnd，这部分代码很简单。
+
+```java
+
+    private void updateLayoutStateToFillEnd(AnchorInfo anchorInfo) {
+        updateLayoutStateToFillEnd(anchorInfo.mPosition, anchorInfo.mCoordinate);
+    }
+
+    private void updateLayoutStateToFillEnd(int itemPosition, int offset) {
+        mLayoutState.mAvailable = mOrientationHelper.getEndAfterPadding() - offset;
+        mLayoutState.mItemDirection = mShouldReverseLayout ? LayoutState.ITEM_DIRECTION_HEAD :
+                LayoutState.ITEM_DIRECTION_TAIL;
+        mLayoutState.mCurrentPosition = itemPosition;
+        mLayoutState.mLayoutDirection = LayoutState.LAYOUT_END;
+        mLayoutState.mOffset = offset;
+        mLayoutState.mScrollingOffset = LayoutState.SCROLLING_OFFSET_NaN;
+    }
+    
+        private void updateLayoutStateToFillStart(AnchorInfo anchorInfo) {
+        updateLayoutStateToFillStart(anchorInfo.mPosition, anchorInfo.mCoordinate);
+    }
+
+    private void updateLayoutStateToFillStart(int itemPosition, int offset) {
+        mLayoutState.mAvailable = offset - mOrientationHelper.getStartAfterPadding();
+        mLayoutState.mCurrentPosition = itemPosition;
+        mLayoutState.mItemDirection = mShouldReverseLayout ? LayoutState.ITEM_DIRECTION_TAIL :
+                LayoutState.ITEM_DIRECTION_HEAD;
+        mLayoutState.mLayoutDirection = LayoutState.LAYOUT_START;
+        mLayoutState.mOffset = offset;
+        mLayoutState.mScrollingOffset = LayoutState.SCROLLING_OFFSET_NaN;
+
+    }
+
+```
+
+上面的代码比较简单，我就没有写注释了，这里要说一点就是因为有了orientationHelper，这LinearLayoutManager就少了很多方向的判断，如果我们写代码的时候有这种很多判断的情况，不妨也可以借鉴下他的这种处理方式。  
+
+接下来就该分析LinearLayoutManager的灵魂方法了，fill是用来根据LayoutState来填充子View的。如果你已经准备好了我们就开始吧。
+
+
+```java
+
+    /**
+     * The magic functions :). Fills the given layout, defined by the layoutState. This is fairly
+     * independent from the rest of the {@link LinearLayoutManager}
+     * and with little change, can be made publicly available as a helper class.
+     *
+     * @param recycler        Current recycler that is attached to RecyclerView
+     * @param layoutState     Configuration on how we should fill out the available space.
+     * @param state           Context passed by the RecyclerView to control scroll steps.
+     * @param stopOnFocusable If true, filling stops in the first focusable new child
+     * @return Number of pixels that it added. Useful for scroll functions.
+     */
+    int fill(RecyclerView.Recycler recycler, LayoutState layoutState,
+            RecyclerView.State state, boolean stopOnFocusable) {
+        // max offset we should set is mFastScroll + available
+        // 记录layout前的avalible值是多少
+        final int start = layoutState.mAvailable;
+        
+        // 这部分代码是滚动的时候才会触发的回收逻辑，研究滚动的时候再分析
+        if (layoutState.mScrollingOffset != LayoutState.SCROLLING_OFFSET_NaN) {
+            // TODO ugly bug fix. should not happen
+            if (layoutState.mAvailable < 0) {
+                layoutState.mScrollingOffset += layoutState.mAvailable;
+            }
+            recycleByLayoutState(recycler, layoutState);
+        }
+        // 剩余空间就是available加上extra的值，extra值我们上面有提到，忘了的同学往前翻一翻。
+        int remainingSpace = layoutState.mAvailable + layoutState.mExtraFillSpace;
+        LayoutChunkResult layoutChunkResult = mLayoutChunkResult;
+        while ((layoutState.mInfinite || remainingSpace > 0) && layoutState.hasMore(state)) {
+            layoutChunkResult.resetInternal();
+            if (RecyclerView.VERBOSE_TRACING) {
+                TraceCompat.beginSection("LLM LayoutChunk");
+            }
+            // 这里又进入了一个重要的方法，最后的layout结果会放在layoutChunkResult中
+            layoutChunk(recycler, state, layoutState, layoutChunkResult);
+            if (RecyclerView.VERBOSE_TRACING) {
+                TraceCompat.endSection();
+            }
+            // 如果已经结束直接中断循环
+            if (layoutChunkResult.mFinished) {
+                break;
+            }
+            // 根据layout的方向和消费的值来调整offset的值。
+            layoutState.mOffset += layoutChunkResult.mConsumed * layoutState.mLayoutDirection;
+            /**
+             * Consume the available space if:
+             * * layoutChunk did not request to be ignored
+             * * OR we are laying out scrap children
+             * * OR we are not doing pre-layout
+             */
+             /**
+               * 然后根据result中的消费情况再修改available和remainingSpace中的值，在我测试的情况中在item改变
+               * 时在layoutStep1中是不会消费这个值的。后面在特殊分析。
+               */
+            if (!layoutChunkResult.mIgnoreConsumed || layoutState.mScrapList != null
+                    || !state.isPreLayout()) {
+                layoutState.mAvailable -= layoutChunkResult.mConsumed;
+                // we keep a separate remaining space because mAvailable is important for recycling
+                remainingSpace -= layoutChunkResult.mConsumed;
+            }
+				
+			  // 如果是滑动的情况还会触发回收逻辑，先跳过。
+            if (layoutState.mScrollingOffset != LayoutState.SCROLLING_OFFSET_NaN) {
+                layoutState.mScrollingOffset += layoutChunkResult.mConsumed;
+                if (layoutState.mAvailable < 0) {
+                    layoutState.mScrollingOffset += layoutState.mAvailable;
+                }
+                recycleByLayoutState(recycler, layoutState);
+            }
+            if (stopOnFocusable && layoutChunkResult.mFocusable) {
+                break;
+            }
+        }
+        if (DEBUG) {
+            validateChildOrder();
+        }
+        // 最后返回消费了的available大小
+        return start - layoutState.mAvailable;
+    }
+
+
+    void layoutChunk(RecyclerView.Recycler recycler, RecyclerView.State state,
+            LayoutState layoutState, LayoutChunkResult result) {
+        // 获取一个子View要么是从scrapList中取得，要么是从recycler中取的。
+        View view = layoutState.next(recycler);
+        if (view == null) {
+            if (DEBUG && layoutState.mScrapList == null) {
+                throw new RuntimeException("received null view when unexpected");
+            }
+            // if we are laying out views in scrap, this may return null which means there is
+            // no more items to layout.
+            result.mFinished = true;
+            return;
+        }
+        RecyclerView.LayoutParams params = (RecyclerView.LayoutParams) view.getLayoutParams();
+        if (layoutState.mScrapList == null) {
+        	// 将子View添加到recyclerView中。
+            if (mShouldReverseLayout == (layoutState.mLayoutDirection
+                    == LayoutState.LAYOUT_START)) {
+                addView(view);
+            } else {
+                addView(view, 0);
+            }
+        } else {
+           // 这种情况只有在layoutForPredictiveAnimations这个方法中才会走这个逻辑
+            if (mShouldReverseLayout == (layoutState.mLayoutDirection
+                    == LayoutState.LAYOUT_START)) {
+                // 这个方法其实就是直接对RecyclerView中的viewInfoStore进行操作，然后打上DISAPPEARED的flag，最后执行动画
+                addDisappearingView(view);
+            } else {
+                addDisappearingView(view, 0);
+            }
+        }
+        // 进行测量操作
+        measureChildWithMargins(view, 0, 0);
+        // 测量后获取消耗后的值
+        result.mConsumed = mOrientationHelper.getDecoratedMeasurement(view);
+        int left, top, right, bottom;
+        
+        // 根据不同的情况计算出layout的位置。
+        if (mOrientation == VERTICAL) {
+            if (isLayoutRTL()) {
+                right = getWidth() - getPaddingRight();
+                left = right - mOrientationHelper.getDecoratedMeasurementInOther(view);
+            } else {
+                left = getPaddingLeft();
+                right = left + mOrientationHelper.getDecoratedMeasurementInOther(view);
+            }
+            if (layoutState.mLayoutDirection == LayoutState.LAYOUT_START) {
+                bottom = layoutState.mOffset;
+                top = layoutState.mOffset - result.mConsumed;
+            } else {
+                top = layoutState.mOffset;
+                bottom = layoutState.mOffset + result.mConsumed;
+            }
+        } else {
+            top = getPaddingTop();
+            bottom = top + mOrientationHelper.getDecoratedMeasurementInOther(view);
+
+            if (layoutState.mLayoutDirection == LayoutState.LAYOUT_START) {
+                right = layoutState.mOffset;
+                left = layoutState.mOffset - result.mConsumed;
+            } else {
+                left = layoutState.mOffset;
+                right = layoutState.mOffset + result.mConsumed;
+            }
+        }
+        // We calculate everything with View's bounding box (which includes decor and margins)
+        // To calculate correct layout position, we subtract margins.
+        // 直接layout
+        layoutDecoratedWithMargins(view, left, top, right, bottom);
+        if (DEBUG) {
+            Log.d(TAG, "laid out child at position " + getPosition(view) + ", with l:"
+                    + (left + params.leftMargin) + ", t:" + (top + params.topMargin) + ", r:"
+                    + (right - params.rightMargin) + ", b:" + (bottom - params.bottomMargin));
+        }
+        // Consume the available space if the view is not removed OR changed
+        // 如果是removed或者changed就会忽略消费
+        if (params.isItemRemoved() || params.isItemChanged()) {
+            result.mIgnoreConsumed = true;
+        }
+        result.mFocusable = view.hasFocusable();
+    }
+	
+	    /**
+         * Gets the view for the next element that we should layout.
+         * Also updates current item index to the next item, based on {@link #mItemDirection}
+         *
+         * @return The next element that we should layout.
+         */
+        View next(RecyclerView.Recycler recycler) {
+        	// 如果scrapList不为空就从其中拿View，为空就从recycler中拿View，只有在layoutForPredictiveAnimations方法中scrapList才不为空。
+            if (mScrapList != null) {
+                return nextViewFromScrapList();
+            }
+            final View view = recycler.getViewForPosition(mCurrentPosition);
+            mCurrentPosition += mItemDirection;
+            return view;
+        }
+	
+
+```
+
+*The magic functions :).* Google的工程师还调皮了一下，fill方法就分析到这里。onLayoutChildren方法大部分都已经走通。
+这里再总结一下主要流程吧，首先会根据pendingData和focused子View和子View来更新AnchorInfo
+
+
