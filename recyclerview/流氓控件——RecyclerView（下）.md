@@ -776,6 +776,369 @@ detachAndScrapAttachedViews的处理方式也非常简单，主要逻辑都是re
 ```
 
 *The magic functions :).* Google的工程师还调皮了一下，fill方法就分析到这里。onLayoutChildren方法大部分都已经走通。
-这里再总结一下主要流程吧，首先会根据pendingData和focused子View和子View来更新AnchorInfo
+这里再总结一下主要流程吧，首先会根据pendingData和focused子View和子View来更新AnchorInfo, 接下来会detach掉上次layout的View，绝大部分情况都会被添加到scrapList中，后面就是根据AnchorInfo来填充子View，我这里以End方向为例：首先通过anchorInfo以End方向更新LayoutState，然后再向End方向填充；End方向填充完成后，通过AnchorInfo向Start方向更新LayoutState然后填充；如果在start方向上还有剩余的空间，还会继续向End方向填充一次。这里稍微提示一下，前面提到在fill之前会把上次的layout子View移动到scrapList中，在fill过程中会从recycler中取子View，recycler会优先从scrapList中寻找，当该子View被Layout后会被从scrapList中remove掉。这个时候可能展示给用户的UI可能是有问题的，还会在有空白的方向移动，填充完空白。如果满足layoutAnimator的条件，如果scrapList中还有View就会把这些View的高度记录下来，然后把这些高度作为available继续填充子View，但是这些View也会被添加到RecyclerView的mViewInfoStore对象中用于动画。  
+
+
+这里继续填补一下上面提到的layoutForPredictiveAnimations这个方法的坑，我就以itemChanged这种情况来分析。先上这个方法的代码：
+
+```java
+
+   /**
+     * If necessary, layouts new items for predictive animations
+     */
+    private void layoutForPredictiveAnimations(RecyclerView.Recycler recycler,
+            RecyclerView.State state, int startOffset,
+            int endOffset) {
+        // If there are scrap children that we did not layout, we need to find where they did go
+        // and layout them accordingly so that animations can work as expected.
+        // This case may happen if new views are added or an existing view expands and pushes
+        // another view out of bounds.
+        if (!state.willRunPredictiveAnimations() ||  getChildCount() == 0 || state.isPreLayout()
+                || !supportsPredictiveItemAnimations()) {
+            return;
+        }
+        // to make the logic simpler, we calculate the size of children and call fill.
+        int scrapExtraStart = 0, scrapExtraEnd = 0;
+        final List<RecyclerView.ViewHolder> scrapList = recycler.getScrapList();
+        final int scrapSize = scrapList.size();
+        final int firstChildPos = getPosition(getChildAt(0));
+        
+        // 获取scrapList中的Item，然后在extar Start或者End方向上记录。
+        for (int i = 0; i < scrapSize; i++) {
+            RecyclerView.ViewHolder scrap = scrapList.get(i);
+            if (scrap.isRemoved()) {
+                continue;
+            }
+            final int position = scrap.getLayoutPosition();
+            final int direction = position < firstChildPos != mShouldReverseLayout
+                    ? LayoutState.LAYOUT_START : LayoutState.LAYOUT_END;
+            if (direction == LayoutState.LAYOUT_START) {
+                scrapExtraStart += mOrientationHelper.getDecoratedMeasurement(scrap.itemView);
+            } else {
+                scrapExtraEnd += mOrientationHelper.getDecoratedMeasurement(scrap.itemView);
+            }
+        }
+
+        if (DEBUG) {
+            Log.d(TAG, "for unused scrap, decided to add " + scrapExtraStart
+                    + " towards start and " + scrapExtraEnd + " towards end");
+        }
+        // 给layout state的scrapList中赋值，这个就是recycler中的scrapList
+        mLayoutState.mScrapList = scrapList;
+        
+        // 在start方向上fill
+        if (scrapExtraStart > 0) {
+            View anchor = getChildClosestToStart();
+            updateLayoutStateToFillStart(getPosition(anchor), startOffset);
+            mLayoutState.mExtraFillSpace = scrapExtraStart;
+            mLayoutState.mAvailable = 0;
+            mLayoutState.assignPositionFromScrapList();
+            fill(recycler, mLayoutState, state, false);
+        }
+		
+		 // 在End方向上fill
+        if (scrapExtraEnd > 0) {
+            View anchor = getChildClosestToEnd();
+            updateLayoutStateToFillEnd(getPosition(anchor), endOffset);
+            mLayoutState.mExtraFillSpace = scrapExtraEnd;
+            mLayoutState.mAvailable = 0;
+            mLayoutState.assignPositionFromScrapList();
+            fill(recycler, mLayoutState, state, false);
+        }
+        // 清空scrapList
+        mLayoutState.mScrapList = null;
+    }
+
+```
+这部分代码也没有特别复杂，上面也有提到过这个方法干的事情。当ItemChanged的时候会触发RecyclerView的measure和layout流程，在layout Step1的首先会把上次layout的child添加到scrapList中，然后进行fill操作，这个时候有一个item已经被标记成了ItemChanged，在fill的时候就不会消费available，也就是说其实这个时候会多layout一个child，具体代码请参考fill方法和layoutChuank方法。这是进入Layout Step2，同样会把Step1的layout结果添加到scrapList中，注意这里会多添加一个，因为Step1的时候多layout了一个child，这时Step2进行fill时会消费scrapList中的View，最后会剩下一个View，这时会进入layoutForPredictiveAnimations，在layoutAnimations的时候会记录这个View的size，然后在对应的layout方向和把那View的size当成extra值继续fill，和一般的fill不同的是会将这个child添加到RecyclerView的mViewInfoStore对象中，为layout Step3中执行动画做准备。但是我经过debug发现，在默认的ItemAnimator中并没有执行动画，而是直接将这个View给Remove掉了，可能这种情况并不能满足动画的条件。  
+
+onLayoutChildren的方法算是分析完了，如果到这里你就以为分析LayoutManager就结束了，那就大错特错了。还有很重要的滑动情况还没有分析，让我们整理下心情继续出发。   
+
+canScrollVertically和canScrollHorizontally是用来控制LayoutManager方法是否能够垂直滑动或者水平滑动，scrollHorizontallyBy和scrollVerticallyBy是用来消费RecyclerView传递过来的滑动距离。我们以scrollVerticallyBy来分析LinearLayoutManager滑动的处理。
+
+```java
+
+    /**
+     * {@inheritDoc}
+     */
+    /**
+      * 如果是手指向上滑动dy>0, 反之dy<0. 该方法的返回值是本次滑动消费的距离。
+      */
+    @Override
+    public int scrollVerticallyBy(int dy, RecyclerView.Recycler recycler,
+            RecyclerView.State state) {
+        if (mOrientation == HORIZONTAL) {
+            return 0;
+        }
+        return scrollBy(dy, recycler, state);
+    }
+    
+    int scrollBy(int delta, RecyclerView.Recycler recycler, RecyclerView.State state) {
+        if (getChildCount() == 0 || delta == 0) {
+            return 0;
+        }
+        ensureLayoutState();
+        // 支持回收，layoutChildren的时候不支持回收的
+        mLayoutState.mRecycle = true;
+        final int layoutDirection = delta > 0 ? LayoutState.LAYOUT_END : LayoutState.LAYOUT_START;
+        final int absDelta = Math.abs(delta);
+        // 更新通过滑动来更新LayoutState，这个方法比较重要等下在具体分析
+        updateLayoutState(layoutDirection, absDelta, true, state);
+        
+        // 滑动的处理也是调用的fill方法。最后的返回值就是消费的大小。
+        final int consumed = mLayoutState.mScrollingOffset
+                + fill(recycler, mLayoutState, state, false);
+        if (consumed < 0) {
+            if (DEBUG) {
+                Log.d(TAG, "Don't have any more elements to scroll");
+            }
+            return 0;
+        }
+        // 根据滑动的方向调整scrolled的值
+        final int scrolled = absDelta > consumed ? layoutDirection * consumed : delta;
+        // 因为fill方法里面只是控制view的填充和回收，并不会移动其中的children，而helper这里处理的就是移动。
+        mOrientationHelper.offsetChildren(-scrolled);
+        if (DEBUG) {
+            Log.d(TAG, "scroll req: " + delta + " scrolled: " + scrolled);
+        }
+        mLayoutState.mLastScrollDelta = scrolled;
+        return scrolled;
+    }
+
+```
+
+在scrollBy方法里也是用到了fill方法来填充子View，不愧是 The Magic Functions。接下来我们分析下通过滑动的值如何更新LayoutState的吧。
+
+```java
+    private void updateLayoutState(int layoutDirection, int requiredSpace,
+            boolean canUseExistingSpace, RecyclerView.State state) {
+        // If parent provides a hint, don't measure unlimited.
+        mLayoutState.mInfinite = resolveIsInfinite();
+        mLayoutState.mLayoutDirection = layoutDirection;
+        mReusableIntPair[0] = 0;
+        mReusableIntPair[1] = 0;
+        calculateExtraLayoutSpace(state, mReusableIntPair);
+        // 计算Extra值都是和前面一样的套路
+        int extraForStart = Math.max(0, mReusableIntPair[0]);
+        int extraForEnd = Math.max(0, mReusableIntPair[1]);
+        boolean layoutToEnd = layoutDirection == LayoutState.LAYOUT_END;
+        mLayoutState.mExtraFillSpace = layoutToEnd ? extraForEnd : extraForStart;
+        // 这里还把Extra的值添加到了忽略回收的值里面
+        mLayoutState.mNoRecycleSpace = layoutToEnd ? extraForStart : extraForEnd;
+        int scrollingOffset;
+        // 判断滑动的方向
+        if (layoutToEnd) {
+            mLayoutState.mExtraFillSpace += mOrientationHelper.getEndPadding();
+            // get the first child in the direction we are going
+            // 找到最后一个Item
+            final View child = getChildClosestToEnd();
+            // the direction in which we are traversing children
+            mLayoutState.mItemDirection = mShouldReverseLayout ? LayoutState.ITEM_DIRECTION_HEAD
+                    : LayoutState.ITEM_DIRECTION_TAIL;
+            // 更新position
+            mLayoutState.mCurrentPosition = getPosition(child) + mLayoutState.mItemDirection;
+            // 最后一个Item的末尾作为offset
+            mLayoutState.mOffset = mOrientationHelper.getDecoratedEnd(child);
+            // calculate how much we can scroll without adding new children (independent of layout)
+            // 这个值比较重要，其实就是最后一个子View的End离RecyclerView End的距离。
+            scrollingOffset = mOrientationHelper.getDecoratedEnd(child)
+                    - mOrientationHelper.getEndAfterPadding();
+
+        } else {
+            final View child = getChildClosestToStart();
+            mLayoutState.mExtraFillSpace += mOrientationHelper.getStartAfterPadding();
+            mLayoutState.mItemDirection = mShouldReverseLayout ? LayoutState.ITEM_DIRECTION_TAIL
+                    : LayoutState.ITEM_DIRECTION_HEAD;
+            mLayoutState.mCurrentPosition = getPosition(child) + mLayoutState.mItemDirection;
+            mLayoutState.mOffset = mOrientationHelper.getDecoratedStart(child);
+            scrollingOffset = -mOrientationHelper.getDecoratedStart(child)
+                    + mOrientationHelper.getStartAfterPadding();
+        }
+        mLayoutState.mAvailable = requiredSpace;
+        if (canUseExistingSpace) {
+        	 // available还会减去一个scrollOffset 
+            mLayoutState.mAvailable -= scrollingOffset;
+        }
+        mLayoutState.mScrollingOffset = scrollingOffset;
+    }
+
+```
+
+关于LayoutState中有两个值的计算比较重要，是available和scrollingOffset，其他的值的计算都和layoutChildren中大同小异。如果是垂直手指向上滑动scrollingOffset的值等于最后一个可见的View的End减去RecyclerView的End。available的值为滑动的绝对值减去scrollingOffset。现在分析在说fill方法的时候挖的坑。里面有关回收的代码，只会在滑动的时候才会触发。
+
+```java
+
+// 在执行循环前会执行的回收操作
+if (layoutState.mScrollingOffset != LayoutState.SCROLLING_OFFSET_NaN) {
+      // TODO ugly bug fix. should not happen
+      // 上面提到在计算available的算法是：滑动距离 - scrollingOffset，当滑动距离比较小的时候available的值就有可能为负数。
+      // 这种情况下scrollingOffset的值会过大，应该以滑动距离为scrollingOffset
+      if (layoutState.mAvailable < 0) {
+         layoutState.mScrollingOffset += layoutState.mAvailable;
+      }
+      // 执行回收操作
+      recycleByLayoutState(recycler, layoutState);
+}
+
+
+// 在循环中执行的回收操作
+if (layoutState.mScrollingOffset != LayoutState.SCROLLING_OFFSET_NaN) {
+	  // scrollingOffset还会加上layout时消费的size
+      layoutState.mScrollingOffset += layoutChunkResult.mConsumed;
+      if (layoutState.mAvailable < 0) {
+         layoutState.mScrollingOffset += layoutState.mAvailable;
+      }
+      recycleByLayoutState(recycler, layoutState);
+}
+
+
+```
+
+废话不多说，直接看recyclByLayoutState中的代码
+
+```java
+
+    /**
+     * Helper method to call appropriate recycle method depending on current layout direction
+     *
+     * @param recycler    Current recycler that is attached to RecyclerView
+     * @param layoutState Current layout state. Right now, this object does not change but
+     *                    we may consider moving it out of this view so passing around as a
+     *                    parameter for now, rather than accessing {@link #mLayoutState}
+     * @see #recycleViewsFromStart(RecyclerView.Recycler, int, int)
+     * @see #recycleViewsFromEnd(RecyclerView.Recycler, int, int)
+     * @see LinearLayoutManager.LayoutState#mLayoutDirection
+     */
+    private void recycleByLayoutState(RecyclerView.Recycler recycler, LayoutState layoutState) {
+        if (!layoutState.mRecycle || layoutState.mInfinite) {
+            return;
+        }
+        int scrollingOffset = layoutState.mScrollingOffset;
+        int noRecycleSpace = layoutState.mNoRecycleSpace;
+        if (layoutState.mLayoutDirection == LayoutState.LAYOUT_START) {
+            recycleViewsFromEnd(recycler, scrollingOffset, noRecycleSpace);
+        } else {
+            recycleViewsFromStart(recycler, scrollingOffset, noRecycleSpace);
+        }
+    }
+    
+    
+    /**
+     * Recycles views that went out of bounds after scrolling towards the end of the layout.
+     * <p>
+     * Checks both layout position and visible position to guarantee that the view is not visible.
+     *
+     * @param recycler Recycler instance of {@link RecyclerView}
+     * @param scrollingOffset This can be used to add additional padding to the visible area. This
+     *                        is used to detect children that will go out of bounds after scrolling,
+     *                        without actually moving them.
+     * @param noRecycleSpace Extra space that should be excluded from recycling. This is the space
+     *                       from {@code extraLayoutSpace[0]}, calculated in {@link
+     *                       #calculateExtraLayoutSpace}.
+     */
+    private void recycleViewsFromStart(RecyclerView.Recycler recycler, int scrollingOffset,
+            int noRecycleSpace) {
+        if (scrollingOffset < 0) {
+            if (DEBUG) {
+                Log.d(TAG, "Called recycle from start with a negative value. This might happen"
+                        + " during layout changes but may be sign of a bug");
+            }
+            return;
+        }
+        // ignore padding, ViewGroup may not clip children.
+        final int limit = scrollingOffset - noRecycleSpace;
+        final int childCount = getChildCount();
+        if (mShouldReverseLayout) {
+            for (int i = childCount - 1; i >= 0; i--) {
+                View child = getChildAt(i);
+                if (mOrientationHelper.getDecoratedEnd(child) > limit
+                        || mOrientationHelper.getTransformedEndWithDecoration(child) > limit) {
+                    // stop here
+                    recycleChildren(recycler, childCount - 1, i);
+                    return;
+                }
+            }
+        } else {
+            for (int i = 0; i < childCount; i++) {
+                View child = getChildAt(i);
+                // 第一个满足end大于limit的View就是RecyclerView中第一个可见的child，而在这个child之前的View都应该被回收
+                if (mOrientationHelper.getDecoratedEnd(child) > limit
+                        || mOrientationHelper.getTransformedEndWithDecoration(child) > limit) {
+                    // stop here
+                    // 最终会调用recycler的recycleView方法回收，后面Recycler部分的时候再分析。
+                    recycleChildren(recycler, 0, i);
+                    return;
+                }
+            }
+        }
+    }
+
+
+```
+
+回收的算法相对也比较简单，也不多说了。这里继续填坑，在onLayoutChildren的时候fill完成后UI是可能有问题的，可能在start方向或者End方向上有空白。
+
+```java
+
+        // changes may cause gaps on the UI, try to fix them.
+        // TODO we can probably avoid this if neither stackFromEnd/reverseLayout/RTL values have
+        // changed
+        if (getChildCount() > 0) {
+            // because layout from end may be changed by scroll to position
+            // we re-calculate it.
+            // find which side we should check for gaps.
+            if (mShouldReverseLayout ^ mStackFromEnd) {
+                int fixOffset = fixLayoutEndGap(endOffset, recycler, state, true);
+                startOffset += fixOffset;
+                endOffset += fixOffset;
+                fixOffset = fixLayoutStartGap(startOffset, recycler, state, false);
+                startOffset += fixOffset;
+                endOffset += fixOffset;
+            } else {
+            		// 当startOffset>0（除去padding）时说明start方向上有空白
+                int fixOffset = fixLayoutStartGap(startOffset, recycler, state, true);
+                startOffset += fixOffset;
+                endOffset += fixOffset;
+                // 当endOffset>0(除去padding)时说明end方向上有空白
+                fixOffset = fixLayoutEndGap(endOffset, recycler, state, false);
+                startOffset += fixOffset;
+                endOffset += fixOffset;
+            }
+        }
+        
+    /**
+     * @return The final offset amount for children
+     */
+    private int fixLayoutStartGap(int startOffset, RecyclerView.Recycler recycler,
+            RecyclerView.State state, boolean canOffsetChildren) {
+        // 计算空白的大小
+        int gap = startOffset - mOrientationHelper.getStartAfterPadding();
+        int fixOffset = 0;
+        if (gap > 0) {
+            // check if we should fix this gap.
+            // 这里直接调用的滚动的方法，来消除空白。
+            fixOffset = -scrollBy(gap, recycler, state);
+        } else {
+            return 0; // nothing to fix
+        }
+        startOffset += fixOffset;
+        if (canOffsetChildren) {
+            // re-calculate gap, see if we could fix it
+            gap = startOffset - mOrientationHelper.getStartAfterPadding();
+            // 如果还存在空白，如果canOffsetChildren这个参数为true，就会强制滚动去除空白。
+            if (gap > 0) {
+                mOrientationHelper.offsetChildren(-gap);
+                return fixOffset - gap;
+            }
+        }
+        return fixOffset;
+    }
+    
+
+```
+
+Gap空白的坑也填完了，最后再来小小总结一下滑动相关逻辑。以Vertical手指向上滑动为例：首先根据滑动的大小更新LayoutState，将RecyclerView最后的一个子View的End减去RecyclerView的End作为scrollingOffset（如果滑动距离很小这个值就是滑动距离）的值，以滑动距离减去scrollingOffset的值作为available的值，然后执行fill操作，在fill操作之前要回收一次子View，回收的逻辑是：子View的End小于scrollingOffset的值的View都会被回收。fill方法在循环过程中也会执行回收子View的操作，在每次执行完成layoutChunk后都会在scrollingOffset的值上再加一个consume的值，fill完成后再调用orientationHelper的offsetChildren方法来移动所有Children。  
+
+到这里LinearLayoutManager就分析完了，如果还有问题就在重复看一下吧。。
 
 
