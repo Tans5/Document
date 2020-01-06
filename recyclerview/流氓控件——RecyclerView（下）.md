@@ -1142,3 +1142,751 @@ Gap空白的坑也填完了，最后再来小小总结一下滑动相关逻辑�
 到这里LinearLayoutManager就分析完了，如果还有问题就在重复看一下吧。。
 
 
+## Recycler
+
+在分析LinearLayoutManger的时候我们有所看到Recycler的代码，这节我们继续分析Recycler的代码。在LinearLayoutManager的onLayoutChildren中会把上一次的Layout的children通过Recycler的scrapView方法将其放到mAttachedScrap或者mChangedScrap这两个list中；在LinearLayoutManager的layoutChunk方法中会通过LayoutState的next方法去拿View，但是最终也是通过recycler的getViewForPosition方法去拿View；在LinearLayoutManager的fill方法中还会通过Recycler的recycleView方法进行回收View。和View的创建和回收都会和Recycler有关，我们针对我们上面说到的情况来具体分析。 
+
+
+scrapView方法代码： 
+
+```java
+
+       /**
+         * Mark an attached view as scrap.
+         *
+         * <p>"Scrap" views are still attached to their parent RecyclerView but are eligible
+         * for rebinding and reuse. Requests for a view for a given position may return a
+         * reused or rebound scrap view instance.</p>
+         *
+         * @param view View to scrap
+         */
+        void scrapView(View view) {
+            final ViewHolder holder = getChildViewHolderInt(view);
+            
+            // 当有Remove或者invalid flag时，会将其添加到attachedScrap中，反之添加到changedScrap中。
+            if (holder.hasAnyOfTheFlags(ViewHolder.FLAG_REMOVED | ViewHolder.FLAG_INVALID)
+                    || !holder.isUpdated() || canReuseUpdatedViewHolder(holder)) {
+                if (holder.isInvalid() && !holder.isRemoved() && !mAdapter.hasStableIds()) {
+                    throw new IllegalArgumentException("Called scrap view with an invalid view."
+                            + " Invalid views cannot be reused from scrap, they should rebound from"
+                            + " recycler pool." + exceptionLabel());
+                }
+                holder.setScrapContainer(this, false);
+                mAttachedScrap.add(holder);
+            } else {
+                if (mChangedScrap == null) {
+                    mChangedScrap = new ArrayList<ViewHolder>();
+                }
+                holder.setScrapContainer(this, true);
+                mChangedScrap.add(holder);
+            }
+        }
+
+```
+
+上面的代码很简单，直接把view 添加到changedScrap或者attachedScrap中。  
+
+recycleView方法：
+
+```java
+
+		/**
+         * Recycle a detached view. The specified view will be added to a pool of views
+         * for later rebinding and reuse.
+         *
+         * <p>A view must be fully detached (removed from parent) before it may be recycled. If the
+         * View is scrapped, it will be removed from scrap list.</p>
+         *
+         * @param view Removed view for recycling
+         * @see LayoutManager#removeAndRecycleView(View, Recycler)
+         */
+        public void recycleView(@NonNull View view) {
+            // This public recycle method tries to make view recycle-able since layout manager
+            // intended to recycle this view (e.g. even if it is in scrap or change cache)
+            ViewHolder holder = getChildViewHolderInt(view);
+            if (holder.isTmpDetached()) {
+                removeDetachedView(view, false);
+            }
+            if (holder.isScrap()) {
+                holder.unScrap();
+            } else if (holder.wasReturnedFromScrap()) {
+                holder.clearReturnedFromScrapFlag();
+            }
+            
+            // 主要是这个方法中进行View的回收
+            recycleViewHolderInternal(holder);
+            // In most cases we dont need call endAnimation() because when view is detached,
+            // ViewPropertyAnimation will end. But if the animation is based on ObjectAnimator or
+            // if the ItemAnimator uses "pending runnable" and the ViewPropertyAnimation has not
+            // started yet, the ItemAnimatior on the view may not be cleared.
+            // In b/73552923, the View is removed by scroll pass while it's waiting in
+            // the "pending moving" list of DefaultItemAnimator and DefaultItemAnimator later in
+            // a post runnable, incorrectly performs postDelayed() on the detached view.
+            // To fix the issue, we issue endAnimation() here to make sure animation of this view
+            // finishes.
+            //
+            // Note the order: we must call endAnimation() after recycleViewHolderInternal()
+            // to avoid recycle twice. If ViewHolder isRecyclable is false,
+            // recycleViewHolderInternal() will not recycle it, endAnimation() will reset
+            // isRecyclable flag and recycle the view.
+            if (mItemAnimator != null && !holder.isRecyclable()) {
+                mItemAnimator.endAnimation(holder);
+            }
+        }
+        
+        
+ 
+        /**
+         * internal implementation checks if view is scrapped or attached and throws an exception
+         * if so.
+         * Public version un-scraps before calling recycle.
+         */
+        void recycleViewHolderInternal(ViewHolder holder) {
+            if (holder.isScrap() || holder.itemView.getParent() != null) {
+                throw new IllegalArgumentException(
+                        "Scrapped or attached views may not be recycled. isScrap:"
+                                + holder.isScrap() + " isAttached:"
+                                + (holder.itemView.getParent() != null) + exceptionLabel());
+            }
+
+            if (holder.isTmpDetached()) {
+                throw new IllegalArgumentException("Tmp detached view should be removed "
+                        + "from RecyclerView before it can be recycled: " + holder
+                        + exceptionLabel());
+            }
+
+            if (holder.shouldIgnore()) {
+                throw new IllegalArgumentException("Trying to recycle an ignored view holder. You"
+                        + " should first call stopIgnoringView(view) before calling recycle."
+                        + exceptionLabel());
+            }
+            final boolean transientStatePreventsRecycling = holder
+                    .doesTransientStatePreventRecycling();
+            @SuppressWarnings("unchecked")
+            final boolean forceRecycle = mAdapter != null
+                    && transientStatePreventsRecycling
+                    && mAdapter.onFailedToRecycleView(holder);
+            boolean cached = false;
+            boolean recycled = false;
+            if (DEBUG && mCachedViews.contains(holder)) {
+                throw new IllegalArgumentException("cached view received recycle internal? "
+                        + holder + exceptionLabel());
+            }
+            
+            // 如果满足回收的条件
+            if (forceRecycle || holder.isRecyclable()) {
+                if (mViewCacheMax > 0
+                        && !holder.hasAnyOfTheFlags(ViewHolder.FLAG_INVALID
+                        | ViewHolder.FLAG_REMOVED
+                        | ViewHolder.FLAG_UPDATE
+                        | ViewHolder.FLAG_ADAPTER_POSITION_UNKNOWN)) {
+                    // Retire oldest cached view
+                    // mCachedViews就是所谓的一级缓存，默认大小为2，这个list中的View是可以直接使用的，所有的View中的数据没有清除
+                    int cachedViewSize = mCachedViews.size();
+                    if (cachedViewSize >= mViewCacheMax && cachedViewSize > 0) {
+                    	// 这个方法直接将cached中的第一条数据移动到pool中
+                        recycleCachedViewAt(0);
+                        cachedViewSize--;
+                    }
+
+                    int targetCacheIndex = cachedViewSize;
+                    if (ALLOW_THREAD_GAP_WORK
+                            && cachedViewSize > 0
+                            && !mPrefetchRegistry.lastPrefetchIncludedPosition(holder.mPosition)) {
+                        // when adding the view, skip past most recently prefetched views
+                        int cacheIndex = cachedViewSize - 1;
+                        while (cacheIndex >= 0) {
+                            int cachedPos = mCachedViews.get(cacheIndex).mPosition;
+                            if (!mPrefetchRegistry.lastPrefetchIncludedPosition(cachedPos)) {
+                                break;
+                            }
+                            cacheIndex--;
+                        }
+                        targetCacheIndex = cacheIndex + 1;
+                    }
+                    // 将目标View放入到cachedViews中
+                    mCachedViews.add(targetCacheIndex, holder);
+                    cached = true;
+                }
+                if (!cached) {
+                		// 如果没有添加到cached中，就会直接放入到pool中
+                    addViewHolderToRecycledViewPool(holder, true);
+                    recycled = true;
+                }
+            } else {
+                // NOTE: A view can fail to be recycled when it is scrolled off while an animation
+                // runs. In this case, the item is eventually recycled by
+                // ItemAnimatorRestoreListener#onAnimationFinished.
+
+                // TODO: consider cancelling an animation when an item is removed scrollBy,
+                // to return it to the pool faster
+                if (DEBUG) {
+                    Log.d(TAG, "trying to recycle a non-recycleable holder. Hopefully, it will "
+                            + "re-visit here. We are still removing it from animation lists"
+                            + exceptionLabel());
+                }
+            }
+            // even if the holder is not removed, we still call this method so that it is removed
+            // from view holder lists.
+            // 移除动画
+            mViewInfoStore.removeViewHolder(holder);
+            if (!cached && !recycled && transientStatePreventsRecycling) {
+            	   // 清除对应的RecyclerView
+                holder.mOwnerRecyclerView = null;
+            }
+        }
+
+
+```
+
+这里简单整理下回收的逻辑，首先先检查cached的size。如果大于0就会先把cached中的第一个View添加到pool中，然后将需要回收的View添加到cached中；如果小于0，就会直接将这个View移动到pool中。
+
+这里看一下recycleCachedViewAt和addViewHolderToRecycledViewPool这两个方法： 
+
+```java
+
+
+       /**
+         * Recycles a cached view and removes the view from the list. Views are added to cache
+         * if and only if they are recyclable, so this method does not check it again.
+         * <p>
+         * A small exception to this rule is when the view does not have an animator reference
+         * but transient state is true (due to animations created outside ItemAnimator). In that
+         * case, adapter may choose to recycle it. From RecyclerView's perspective, the view is
+         * still recyclable since Adapter wants to do so.
+         *
+         * @param cachedViewIndex The index of the view in cached views list
+         */
+         // 这段代码非常简单，就不多说了。
+        void recycleCachedViewAt(int cachedViewIndex) {
+            if (DEBUG) {
+                Log.d(TAG, "Recycling cached view at index " + cachedViewIndex);
+            }
+            ViewHolder viewHolder = mCachedViews.get(cachedViewIndex);
+            if (DEBUG) {
+                Log.d(TAG, "CachedViewHolder to be recycled: " + viewHolder);
+            }
+            addViewHolderToRecycledViewPool(viewHolder, true);
+            mCachedViews.remove(cachedViewIndex);
+        }
+        
+        
+        /**
+         * Prepares the ViewHolder to be removed/recycled, and inserts it into the RecycledViewPool.
+         *
+         * Pass false to dispatchRecycled for views that have not been bound.
+         *
+         * @param holder Holder to be added to the pool.
+         * @param dispatchRecycled True to dispatch View recycled callbacks.
+         */
+         // 这段代码也非常简单
+        void addViewHolderToRecycledViewPool(@NonNull ViewHolder holder, boolean dispatchRecycled) {
+            clearNestedRecyclerViewIfNotNested(holder);
+            if (holder.hasAnyOfTheFlags(ViewHolder.FLAG_SET_A11Y_ITEM_DELEGATE)) {
+                holder.setFlags(0, ViewHolder.FLAG_SET_A11Y_ITEM_DELEGATE);
+                ViewCompat.setAccessibilityDelegate(holder.itemView, null);
+            }
+            if (dispatchRecycled) {
+                dispatchViewRecycled(holder);
+            }
+            holder.mOwnerRecyclerView = null;
+            // 关键方法，进去看看。
+            getRecycledViewPool().putRecycledView(holder);
+        }
+
+
+
+        /**
+         * Add a scrap ViewHolder to the pool.
+         * <p>
+         * If the pool is already full for that ViewHolder's type, it will be immediately discarded.
+         *
+         * @param scrap ViewHolder to be added to the pool.
+         */
+        public void putRecycledView(ViewHolder scrap) {
+        	 // 先获取该viewHolder的type，这个就是重写adapter对应的方法，返回的type。
+            final int viewType = scrap.getItemViewType();
+            // 获取对应type的list，这个size的默认最大值为5
+            final ArrayList<ViewHolder> scrapHeap = getScrapDataForType(viewType).mScrapHeap;
+            if (mScrap.get(viewType).mMaxScrap <= scrapHeap.size()) {
+                return;
+            }
+            if (DEBUG && scrapHeap.contains(scrap)) {
+                throw new IllegalArgumentException("this scrap item already exists");
+            }
+            // 首先清除这个ViewHolder中的数据
+            scrap.resetInternal();
+            // 然后添加到pool中
+            scrapHeap.add(scrap);
+        }
+        
+        /**
+         * 清除ViewHolder中的数据。
+         */
+        void resetInternal() {
+            mFlags = 0;
+            mPosition = NO_POSITION;
+            mOldPosition = NO_POSITION;
+            mItemId = NO_ID;
+            mPreLayoutPosition = NO_POSITION;
+            mIsRecyclableCount = 0;
+            mShadowedHolder = null;
+            mShadowingHolder = null;
+            clearPayload();
+            mWasImportantForAccessibilityBeforeHidden = ViewCompat.IMPORTANT_FOR_ACCESSIBILITY_AUTO;
+            mPendingAccessibilityState = PENDING_ACCESSIBILITY_STATE_NOT_SET;
+            clearNestedRecyclerViewIfNotNested(this);
+        }
+
+```
+
+上面的代码描述了如何添加View到pool中。
+
+现在分析获取View的方法getViewForPosition。
+
+```java
+
+        /**
+         * Obtain a view initialized for the given position.
+         *
+         * This method should be used by {@link LayoutManager} implementations to obtain
+         * views to represent data from an {@link Adapter}.
+         * <p>
+         * The Recycler may reuse a scrap or detached view from a shared pool if one is
+         * available for the correct view type. If the adapter has not indicated that the
+         * data at the given position has changed, the Recycler will attempt to hand back
+         * a scrap view that was previously initialized for that data without rebinding.
+         *
+         * @param position Position to obtain a view for
+         * @return A view representing the data at <code>position</code> from <code>adapter</code>
+         */
+        @NonNull
+        public View getViewForPosition(int position) {
+            return getViewForPosition(position, false);
+        }
+
+        View getViewForPosition(int position, boolean dryRun) {
+            return tryGetViewHolderForPositionByDeadline(position, dryRun, FOREVER_NS).itemView;
+        }
+        
+        
+        
+        /**
+         * Attempts to get the ViewHolder for the given position, either from the Recycler scrap,
+         * cache, the RecycledViewPool, or creating it directly.
+         * <p>
+         * If a deadlineNs other than {@link #FOREVER_NS} is passed, this method early return
+         * rather than constructing or binding a ViewHolder if it doesn't think it has time.
+         * If a ViewHolder must be constructed and not enough time remains, null is returned. If a
+         * ViewHolder is aquired and must be bound but not enough time remains, an unbound holder is
+         * returned. Use {@link ViewHolder#isBound()} on the returned object to check for this.
+         *
+         * @param position Position of ViewHolder to be returned.
+         * @param dryRun True if the ViewHolder should not be removed from scrap/cache/
+         * @param deadlineNs Time, relative to getNanoTime(), by which bind/create work should
+         *                   complete. If FOREVER_NS is passed, this method will not fail to
+         *                   create/bind the holder if needed.
+         *
+         * @return ViewHolder for requested position
+         */
+         // 这个方法有点长，不过不用怕，奥利给。。。
+        @Nullable
+        ViewHolder tryGetViewHolderForPositionByDeadline(int position,
+                boolean dryRun, long deadlineNs) {
+            if (position < 0 || position >= mState.getItemCount()) {
+                throw new IndexOutOfBoundsException("Invalid item position " + position
+                        + "(" + position + "). Item count:" + mState.getItemCount()
+                        + exceptionLabel());
+            }
+            boolean fromScrapOrHiddenOrCache = false;
+            ViewHolder holder = null;
+            // 0) If there is a changed scrap, try to find from there
+            
+            // 如果是preLayout会从changedScrap中去寻找holder，这里需要说明一下，scrap中的View数据也是没有清除的可以直接使用。
+            if (mState.isPreLayout()) {
+                holder = getChangedScrapViewForPosition(position);
+                fromScrapOrHiddenOrCache = holder != null;
+            }
+            // 1) Find by position from scrap/hidden list/cache
+            if (holder == null) {
+            	// 从Scrap, Hidden(这个没太懂是啥情况下的), Cached中获取ViewHolder
+                holder = getScrapOrHiddenOrCachedHolderForPosition(position, dryRun);
+                if (holder != null) {
+                    if (!validateViewHolderForOffsetPosition(holder)) {
+                        // recycle holder (and unscrap if relevant) since it can't be used
+                        if (!dryRun) {
+                            // we would like to recycle this but need to make sure it is not used by
+                            // animation logic etc.
+                            holder.addFlags(ViewHolder.FLAG_INVALID);
+                            if (holder.isScrap()) {
+                                removeDetachedView(holder.itemView, false);
+                                holder.unScrap();
+                            } else if (holder.wasReturnedFromScrap()) {
+                                holder.clearReturnedFromScrapFlag();
+                            }
+                            recycleViewHolderInternal(holder);
+                        }
+                        holder = null;
+                    } else {
+                        fromScrapOrHiddenOrCache = true;
+                    }
+                }
+            }
+            if (holder == null) {
+                // 经过我的debug发现这个position和offsetPosition大部分时间都是一样的，不知道是为了处理什么特殊情况。
+                final int offsetPosition = mAdapterHelper.findPositionOffset(position);
+                if (offsetPosition < 0 || offsetPosition >= mAdapter.getItemCount()) {
+                    throw new IndexOutOfBoundsException("Inconsistency detected. Invalid item "
+                            + "position " + position + "(offset:" + offsetPosition + ")."
+                            + "state:" + mState.getItemCount() + exceptionLabel());
+                }
+
+                final int type = mAdapter.getItemViewType(offsetPosition);
+                // 2) Find from scrap/cache via stable ids, if exists
+                if (mAdapter.hasStableIds()) {
+                    
+                    // 通过stableId再来寻找一次ViewHolder，这个在定义adapter的时候应该就能发现相关方法，所以通过添加StableIds可以提高holder的重用率。
+                    holder = getScrapOrCachedViewForId(mAdapter.getItemId(offsetPosition),
+                            type, dryRun);
+                    if (holder != null) {
+                        // update position
+                        holder.mPosition = offsetPosition;
+                        fromScrapOrHiddenOrCache = true;
+                    }
+                }
+                if (holder == null && mViewCacheExtension != null) {
+                    // We are NOT sending the offsetPosition because LayoutManager does not
+                    // know it.
+                    // 这个是通过自定义cache来获取View，在某些情况下可以尝试下。
+                    final View view = mViewCacheExtension
+                            .getViewForPositionAndType(this, position, type);
+                    if (view != null) {
+                        holder = getChildViewHolder(view);
+                        if (holder == null) {
+                            throw new IllegalArgumentException("getViewForPositionAndType returned"
+                                    + " a view which does not have a ViewHolder"
+                                    + exceptionLabel());
+                        } else if (holder.shouldIgnore()) {
+                            throw new IllegalArgumentException("getViewForPositionAndType returned"
+                                    + " a view that is ignored. You must call stopIgnoring before"
+                                    + " returning this view." + exceptionLabel());
+                        }
+                    }
+                }
+                if (holder == null) { // fallback to pool
+                    if (DEBUG) {
+                        Log.d(TAG, "tryGetViewHolderForPositionByDeadline("
+                                + position + ") fetching from shared pool");
+                    }
+                    // 通过Pool中获取ViewHolder。
+                    holder = getRecycledViewPool().getRecycledView(type);
+                    if (holder != null) {
+                        holder.resetInternal();
+                        if (FORCE_INVALIDATE_DISPLAY_LIST) {
+                            invalidateDisplayListInt(holder);
+                        }
+                    }
+                }
+                if (holder == null) {
+                    long start = getNanoTime();
+                    if (deadlineNs != FOREVER_NS
+                            && !mRecyclerPool.willCreateInTime(type, start, deadlineNs)) {
+                        // abort - we have a deadline we can't meet
+                        return null;
+                    }
+                    // 通过adapter创建ViewHolder
+                    holder = mAdapter.createViewHolder(RecyclerView.this, type);
+                    if (ALLOW_THREAD_GAP_WORK) {
+                        // only bother finding nested RV if prefetching
+                        // 寻找itemView中是否有RecyclerView
+                        RecyclerView innerView = findNestedRecyclerView(holder.itemView);
+                        if (innerView != null) {
+                        	// 如果有RecyclerView的话会把它放在这里，但是后续我没有发现它做了什么特殊的处理。
+                            holder.mNestedRecyclerView = new WeakReference<>(innerView);
+                        }
+                    }
+
+                    long end = getNanoTime();
+                    mRecyclerPool.factorInCreateTime(type, end - start);
+                    if (DEBUG) {
+                        Log.d(TAG, "tryGetViewHolderForPositionByDeadline created new ViewHolder");
+                    }
+                }
+            }
+
+            // This is very ugly but the only place we can grab this information
+            // before the View is rebound and returned to the LayoutManager for post layout ops.
+            // We don't need this in pre-layout since the VH is not updated by the LM.
+            if (fromScrapOrHiddenOrCache && !mState.isPreLayout() && holder
+                    .hasAnyOfTheFlags(ViewHolder.FLAG_BOUNCED_FROM_HIDDEN_LIST)) {
+                holder.setFlags(0, ViewHolder.FLAG_BOUNCED_FROM_HIDDEN_LIST);
+                if (mState.mRunSimpleAnimations) {
+                    int changeFlags = ItemAnimator
+                            .buildAdapterChangeFlagsForAnimations(holder);
+                    changeFlags |= ItemAnimator.FLAG_APPEARED_IN_PRE_LAYOUT;
+                    final ItemHolderInfo info = mItemAnimator.recordPreLayoutInformation(mState,
+                            holder, changeFlags, holder.getUnmodifiedPayloads());
+                    recordAnimationInfoIfBouncedHiddenView(holder, info);
+                }
+            }
+
+            boolean bound = false;
+            if (mState.isPreLayout() && holder.isBound()) {
+                // do not update unless we absolutely have to.
+                holder.mPreLayoutPosition = position;
+            } else if (!holder.isBound() || holder.needsUpdate() || holder.isInvalid()) {
+                if (DEBUG && holder.isRemoved()) {
+                    throw new IllegalStateException("Removed holder should be bound and it should"
+                            + " come here only in pre-layout. Holder: " + holder
+                            + exceptionLabel());
+                }
+                final int offsetPosition = mAdapterHelper.findPositionOffset(position);
+                // 当holder需要绑定数据时，就会调用该方法绑定数据，例如，ViewHolder刚创建的时候，从Pool中取出的ViewHolder时。
+                bound = tryBindViewHolderByDeadline(holder, offsetPosition, position, deadlineNs);
+            }
+
+            final ViewGroup.LayoutParams lp = holder.itemView.getLayoutParams();
+            final LayoutParams rvLayoutParams;
+            if (lp == null) {
+                rvLayoutParams = (LayoutParams) generateDefaultLayoutParams();
+                holder.itemView.setLayoutParams(rvLayoutParams);
+            } else if (!checkLayoutParams(lp)) {
+                rvLayoutParams = (LayoutParams) generateLayoutParams(lp);
+                holder.itemView.setLayoutParams(rvLayoutParams);
+            } else {
+                rvLayoutParams = (LayoutParams) lp;
+            }
+            rvLayoutParams.mViewHolder = holder;
+            rvLayoutParams.mPendingInvalidate = fromScrapOrHiddenOrCache && bound;
+            return holder;
+        }
+
+
+```
+
+首先如果是PreLayout，会先从ChangedScrap中去寻找holder，然后从scrap,hidden,cached中去寻找holder，如果adapter支持StableIds，还会通过ids在scrap和cached中再寻找一次，上面的方法都没有找到就会在Pool中去取对应type的holder，如果pool中也没有，就会通过adapter创建一个新的holder。如果上面获取的ViewHolder需要绑定数据时，就会调用绑定数据的方法。 
+
+下面就贴出各种取holder的方法。
+
+```java
+
+         // 从ChangedScraped中取holder
+         ViewHolder getChangedScrapViewForPosition(int position) {
+            // If pre-layout, check the changed scrap for an exact match.
+            final int changedScrapSize;
+            if (mChangedScrap == null || (changedScrapSize = mChangedScrap.size()) == 0) {
+                return null;
+            }
+            // find by position
+            for (int i = 0; i < changedScrapSize; i++) {
+                final ViewHolder holder = mChangedScrap.get(i);
+                if (!holder.wasReturnedFromScrap() && holder.getLayoutPosition() == position) {
+                    当从srap中取Item时都会打上FLAG_RETURNED_FROM_SCRAP
+                    holder.addFlags(ViewHolder.FLAG_RETURNED_FROM_SCRAP);
+                    return holder;
+                }
+            }
+            // find by id
+            // 这个只是通过id再找一次，上面有很多类似的操作。
+            if (mAdapter.hasStableIds()) {
+                final int offsetPosition = mAdapterHelper.findPositionOffset(position);
+                if (offsetPosition > 0 && offsetPosition < mAdapter.getItemCount()) {
+                    final long id = mAdapter.getItemId(offsetPosition);
+                    for (int i = 0; i < changedScrapSize; i++) {
+                        final ViewHolder holder = mChangedScrap.get(i);
+                        if (!holder.wasReturnedFromScrap() && holder.getItemId() == id) {
+                            holder.addFlags(ViewHolder.FLAG_RETURNED_FROM_SCRAP);
+                            return holder;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+
+        /**
+         * Returns a view for the position either from attach scrap, hidden children, or cache.
+         *
+         * @param position Item position
+         * @param dryRun  Does a dry run, finds the ViewHolder but does not remove
+         * @return a ViewHolder that can be re-used for this position.
+         */
+        ViewHolder getScrapOrHiddenOrCachedHolderForPosition(int position, boolean dryRun) {
+            final int scrapCount = mAttachedScrap.size();
+
+            // Try first for an exact, non-invalid match from scrap.
+            for (int i = 0; i < scrapCount; i++) {
+                final ViewHolder holder = mAttachedScrap.get(i);
+                // 从scrap中找item，必须不是已经重holder中返回过一次的item。
+                if (!holder.wasReturnedFromScrap() && holder.getLayoutPosition() == position
+                        && !holder.isInvalid() && (mState.mInPreLayout || !holder.isRemoved())) {
+                    holder.addFlags(ViewHolder.FLAG_RETURNED_FROM_SCRAP);
+                    return holder;
+                }
+            }
+
+            if (!dryRun) {
+                // 这个Hidden状态，不太清楚，但最后会被添加到scrap中。
+                View view = mChildHelper.findHiddenNonRemovedView(position);
+                if (view != null) {
+                    // This View is good to be used. We just need to unhide, detach and move to the
+                    // scrap list.
+                    final ViewHolder vh = getChildViewHolderInt(view);
+                    mChildHelper.unhide(view);
+                    int layoutIndex = mChildHelper.indexOfChild(view);
+                    if (layoutIndex == RecyclerView.NO_POSITION) {
+                        throw new IllegalStateException("layout index should not be -1 after "
+                                + "unhiding a view:" + vh + exceptionLabel());
+                    }
+                    mChildHelper.detachViewFromParent(layoutIndex);
+                    scrapView(view);
+                    vh.addFlags(ViewHolder.FLAG_RETURNED_FROM_SCRAP
+                            | ViewHolder.FLAG_BOUNCED_FROM_HIDDEN_LIST);
+                    return vh;
+                }
+            }
+
+            // Search in our first-level recycled view cache.
+            final int cacheSize = mCachedViews.size();
+            // 重cached中拿viewholder，但是如果是invalid的话是拿不到的，但是在getScrapOrCachedViewForId方法中可以拿到，不太清楚是为了处理哪种特殊情况。
+            for (int i = 0; i < cacheSize; i++) {
+                final ViewHolder holder = mCachedViews.get(i);
+                // invalid view holders may be in cache if adapter has stable ids as they can be
+                // retrieved via getScrapOrCachedViewForId
+                if (!holder.isInvalid() && holder.getLayoutPosition() == position
+                        && !holder.isAttachedToTransitionOverlay()) {
+                    if (!dryRun) {
+                        mCachedViews.remove(i);
+                    }
+                    if (DEBUG) {
+                        Log.d(TAG, "getScrapOrHiddenOrCachedHolderForPosition(" + position
+                                + ") found match in cache: " + holder);
+                    }
+                    return holder;
+                }
+            }
+            return null;
+        }
+
+		// 通过Id再在scrap和cached中查找一次，都是些常规操作，就不多说了。
+        ViewHolder getScrapOrCachedViewForId(long id, int type, boolean dryRun) {
+            // Look in our attached views first
+            final int count = mAttachedScrap.size();
+            for (int i = count - 1; i >= 0; i--) {
+                final ViewHolder holder = mAttachedScrap.get(i);
+                if (holder.getItemId() == id && !holder.wasReturnedFromScrap()) {
+                    if (type == holder.getItemViewType()) {
+                        holder.addFlags(ViewHolder.FLAG_RETURNED_FROM_SCRAP);
+                        if (holder.isRemoved()) {
+                            // this might be valid in two cases:
+                            // > item is removed but we are in pre-layout pass
+                            // >> do nothing. return as is. make sure we don't rebind
+                            // > item is removed then added to another position and we are in
+                            // post layout.
+                            // >> remove removed and invalid flags, add update flag to rebind
+                            // because item was invisible to us and we don't know what happened in
+                            // between.
+                            if (!mState.isPreLayout()) {
+                                holder.setFlags(ViewHolder.FLAG_UPDATE, ViewHolder.FLAG_UPDATE
+                                        | ViewHolder.FLAG_INVALID | ViewHolder.FLAG_REMOVED);
+                            }
+                        }
+                        return holder;
+                    } else if (!dryRun) {
+                        // if we are running animations, it is actually better to keep it in scrap
+                        // but this would force layout manager to lay it out which would be bad.
+                        // Recycle this scrap. Type mismatch.
+                        mAttachedScrap.remove(i);
+                        removeDetachedView(holder.itemView, false);
+                        quickRecycleScrapView(holder.itemView);
+                    }
+                }
+            }
+
+            // Search the first-level cache
+            final int cacheSize = mCachedViews.size();
+            for (int i = cacheSize - 1; i >= 0; i--) {
+                final ViewHolder holder = mCachedViews.get(i);
+                if (holder.getItemId() == id && !holder.isAttachedToTransitionOverlay()) {
+                    if (type == holder.getItemViewType()) {
+                        if (!dryRun) {
+                            mCachedViews.remove(i);
+                        }
+                        return holder;
+                    } else if (!dryRun) {
+                        recycleCachedViewAt(i);
+                        return null;
+                    }
+                }
+            }
+            return null;
+        }
+
+
+        /**
+         * Attempts to bind view, and account for relevant timing information. If
+         * deadlineNs != FOREVER_NS, this method may fail to bind, and return false.
+         *
+         * @param holder Holder to be bound.
+         * @param offsetPosition Position of item to be bound.
+         * @param position Pre-layout position of item to be bound.
+         * @param deadlineNs Time, relative to getNanoTime(), by which bind/create work should
+         *                   complete. If FOREVER_NS is passed, this method will not fail to
+         *                   bind the holder.
+         * @return
+         */
+         // 这个方法就通过adapter绑定数据，其中还有时间的记录，默认我们是没有管这个时间的。
+        @SuppressWarnings("unchecked")
+        private boolean tryBindViewHolderByDeadline(@NonNull ViewHolder holder, int offsetPosition,
+                int position, long deadlineNs) {
+            holder.mOwnerRecyclerView = RecyclerView.this;
+            final int viewType = holder.getItemViewType();
+            long startBindNs = getNanoTime();
+            if (deadlineNs != FOREVER_NS
+                    && !mRecyclerPool.willBindInTime(viewType, startBindNs, deadlineNs)) {
+                // abort - we have a deadline we can't meet
+                return false;
+            }
+            mAdapter.bindViewHolder(holder, offsetPosition);
+            long endBindNs = getNanoTime();
+            mRecyclerPool.factorInBindTime(holder.getItemViewType(), endBindNs - startBindNs);
+            attachAccessibilityDelegateOnBind(holder);
+            if (mState.isPreLayout()) {
+                holder.mPreLayoutPosition = position;
+            }
+            return true;
+        }
+        
+        
+       /**
+         * This method internally calls {@link #onBindViewHolder(ViewHolder, int)} to update the
+         * {@link ViewHolder} contents with the item at the given position and also sets up some
+         * private fields to be used by RecyclerView.
+         *
+         * @see #onBindViewHolder(ViewHolder, int)
+         */
+        public final void bindViewHolder(@NonNull VH holder, int position) {
+            holder.mPosition = position;
+            if (hasStableIds()) {
+                holder.mItemId = getItemId(position);
+            }
+            holder.setFlags(ViewHolder.FLAG_BOUND,
+                    ViewHolder.FLAG_BOUND | ViewHolder.FLAG_UPDATE | ViewHolder.FLAG_INVALID
+                            | ViewHolder.FLAG_ADAPTER_POSITION_UNKNOWN);
+            TraceCompat.beginSection(TRACE_BIND_VIEW_TAG);
+            // 熟悉的方法，而且还有 payloads，相关代码感兴趣的同学可以继续研究。
+            onBindViewHolder(holder, position, holder.getUnmodifiedPayloads());
+            holder.clearPayload();
+            final ViewGroup.LayoutParams layoutParams = holder.itemView.getLayoutParams();
+            if (layoutParams instanceof RecyclerView.LayoutParams) {
+                ((LayoutParams) layoutParams).mInsetsDirty = true;
+            }
+            TraceCompat.endSection();
+        }
+
+
+```
+
+除了某些特定的flag的用途外，基本还是比较好理解，不赘述了。
+
