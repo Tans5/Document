@@ -1888,5 +1888,264 @@ recycleView方法：
 
 ```
 
-除了某些特定的flag的用途外，基本还是比较好理解，不赘述了。
+除了某些特定的flag的用途外，基本还是比较好理解，不赘述了。  
+Recycler相关的代码就分析到这里，相对于LayoutManager和RecyclerView中的代码还是简单了很多，也不是很难理解。  
+
+
+## One More Thing
+
+我在研究LinearLayoutManager时，自己也根据它的代码也写了一个支持循环滚动的LLM，其中删除了一些不常用的逻辑。但是主要的Layout和滚动的算法都是和官方的LLM都是一样的，由于代码太长这里就不贴出来了。但是这里可以给大家推荐一下我自己写的一个分割线的ItemDecoration，代码不长，但是能实现我们开发中常用的功能，支持水平垂直的的列表，支持网格的分割线，支持分割线的margin值，也支持自定义的分割线绘制，支持是否绘制某条特定的分割线。这里贴出代码。
+
+```kotlin
+
+package com.tans.recyclerviewutils
+
+import android.graphics.*
+import android.graphics.drawable.Drawable
+import android.view.View
+import androidx.annotation.ColorInt
+import androidx.recyclerview.widget.RecyclerView
+
+/**
+ *
+ * author: pengcheng.tan
+ * date: 2019-12-23
+ */
+
+typealias DividerController = (child: View, parent: RecyclerView, state: RecyclerView.State) -> Boolean
+
+class IgnoreGridLastLineHorizontalDividerController(private val rowSize: Int) : DividerController {
+
+    override fun invoke(child: View, parent: RecyclerView, state: RecyclerView.State): Boolean {
+        val holder = parent.getChildViewHolder(child)
+        val itemCount = state.itemCount
+        val lastLineSize = itemCount % rowSize
+        return holder.layoutPosition !in itemCount - lastLineSize until itemCount
+    }
+}
+
+class IgnoreGridLastRowVerticalDividerController(private val rowSize: Int,
+                                                 private val ignoreLastItem: Boolean = false) : DividerController {
+
+    override fun invoke(child: View, parent: RecyclerView, state: RecyclerView.State): Boolean {
+        val holder = parent.getChildViewHolder(child)
+        return if (ignoreLastItem && holder.layoutPosition == state.itemCount - 1) {
+            false
+        } else {
+            (holder.layoutPosition + 1) % rowSize != 0
+        }
+    }
+
+}
+
+val ignoreLastDividerController: DividerController = { child, parent, state ->
+    val holder = parent.getChildViewHolder(child)
+    holder.layoutPosition != state.itemCount - 1
+}
+
+class MarginDividerItemDecoration(
+    val divider: Divider,
+    val marginStart: Int,
+    val marginEnd: Int,
+    val dividerDirection: DividerDirection,
+    val dividerController: DividerController
+) : RecyclerView.ItemDecoration() {
+
+
+    override fun onDraw(c: Canvas, parent: RecyclerView, state: RecyclerView.State) {
+        val childCount: Int = parent.childCount
+        for (i in 0 until childCount) {
+            val child = parent.getChildAt(i)
+            if (!dividerController(child, parent, state)) {
+                continue
+            }
+            val bounds = Rect()
+            parent.layoutManager?.getDecoratedBoundsWithMargins(child, bounds)
+                ?: error("LayoutManager is null")
+            c.save()
+            val left = when (dividerDirection) {
+                DividerDirection.Horizontal -> marginStart + bounds.left
+                DividerDirection.Vertical -> bounds.right - divider.size
+            }
+            val top = when (dividerDirection) {
+                DividerDirection.Horizontal -> bounds.bottom - divider.size
+                DividerDirection.Vertical -> bounds.top + marginStart
+            }
+            val right = when (dividerDirection) {
+                DividerDirection.Horizontal -> bounds.right - marginEnd
+                DividerDirection.Vertical -> bounds.right
+            }
+            val bottom = when (dividerDirection) {
+                DividerDirection.Horizontal -> bounds.bottom
+                DividerDirection.Vertical -> bounds.bottom - marginEnd
+            }
+            c.clipRect(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
+            c.translate(left.toFloat(), top.toFloat())
+            divider.onDraw(canvas = c, width = right - left, height = bottom - top, vh = parent.getChildViewHolder(child))
+            c.restore()
+        }
+    }
+
+    override fun getItemOffsets(
+        outRect: Rect,
+        view: View,
+        parent: RecyclerView,
+        state: RecyclerView.State
+    ) {
+        if (dividerController(view, parent, state)) {
+            when (dividerDirection) {
+                DividerDirection.Horizontal -> {
+                    outRect.set(0, 0, 0, divider.size)
+                }
+                DividerDirection.Vertical -> {
+                    outRect.set(0, 0, divider.size, 0)
+                }
+            }
+        } else {
+            outRect.set(0, 0, 0, 0)
+        }
+    }
+
+
+    companion object {
+
+
+        enum class DividerDirection { Horizontal, Vertical }
+
+        class Builder {
+
+            private var divider: Divider = ColorDivider(color = Color.rgb(66, 66, 66), size = 2)
+            private var marginStart: Int = 0
+            private var marginEnd: Int = 0
+            private var dividerDirection: DividerDirection = DividerDirection.Horizontal
+            private var dividerController: DividerController = { _, _, _ -> true }
+
+            fun divider(divider: Divider): Builder {
+                this.divider = divider
+                return this
+            }
+
+            fun marginStart(marginStart: Int): Builder {
+                this.marginStart = marginStart
+                return this
+            }
+
+            fun marginEnd(marginEnd: Int): Builder {
+                this.marginEnd = marginEnd
+                return this
+            }
+
+            fun dividerDirection(dividerDirection: DividerDirection): Builder {
+                this.dividerDirection = dividerDirection
+                return this
+            }
+
+            fun dividerController(dividerController: DividerController): Builder {
+                this.dividerController = dividerController
+                return this
+            }
+
+            fun build(): MarginDividerItemDecoration {
+                return MarginDividerItemDecoration(
+                    divider = divider,
+                    marginStart = marginStart,
+                    marginEnd = marginEnd,
+                    dividerDirection = dividerDirection,
+                    dividerController = dividerController
+                )
+            }
+
+        }
+
+        interface Divider {
+
+            // pixel size, divider width or height.
+            val size: Int
+
+            fun onDraw(canvas: Canvas, width: Int, height: Int, vh: RecyclerView.ViewHolder)
+
+        }
+
+        class ColorDivider(
+            @ColorInt val color: Int,
+            override val size: Int
+        ) : Divider {
+
+            private val paint: Paint = Paint().apply {
+                color = this@ColorDivider.color
+                style = Paint.Style.FILL
+                isAntiAlias = true
+            }
+
+            override fun onDraw(canvas: Canvas, width: Int, height: Int, vh: RecyclerView.ViewHolder) {
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            }
+        }
+
+        class DrawableDivider(
+            val drawable: Drawable,
+            override val size: Int
+        ) : Divider {
+
+            override fun onDraw(canvas: Canvas, width: Int, height: Int, vh: RecyclerView.ViewHolder) {
+                drawable.setBounds(0, 0, width, height)
+                drawable.draw(canvas)
+            }
+        }
+    }
+
+}
+
+```
+
+默认提供了两种Divider，ColorDivider和DrawableDivider，你也可以自定义Divider.比如说你还可以自定义一个Divider奇数行用一种颜色显示，偶数行用一种颜色显示。发挥自己的想象就好了。  
+DividerController时用来控制是否绘制某一行的分割线。默认有三个实现，ignoreLastDividerController：忽略最后一个item的分割线；IgnoreGridLastLineHorizontalDividerController：忽略网格布局的最后一行的最后一行水平分割线；IgnoreGridLastRowVerticalDividerController：忽略网格布局的每一行的最后一个item垂直分割线。这个也可以根据你的需求自定义。  
+
+这里给一个Simple：
+
+```kotlin
+
+// 水平分割线
+hello_rv.addItemDecoration(
+            MarginDividerItemDecoration.Companion.Builder()
+                .divider(divider = MarginDividerItemDecoration.Companion.ColorDivider(
+                    color = Color.RED,
+                    size = 4
+                )
+                )
+                .marginStart(40)
+                .marginEnd(20)
+                .build()
+        )
+        
+// 网格分割线
+
+rv.addItemDecoration(
+                MarginDividerItemDecoration.Companion.Builder()
+                    .divider(
+                        MarginDividerItemDecoration.Companion.ColorDivider(
+                            color = Color.RED,
+                            size = 4
+                        )
+                    )
+                    .dividerDirection(MarginDividerItemDecoration.Companion.DividerDirection.Horizontal)
+                    .dividerController(IgnoreGridLastLineHorizontalDividerController(4))
+                    .build()
+            )
+rv.addItemDecoration(
+                MarginDividerItemDecoration.Companion.Builder()
+                    .divider(
+                        MarginDividerItemDecoration.Companion.ColorDivider(
+                            color = Color.RED,
+                            size = 4
+                        )
+                    )
+                    .dividerDirection(MarginDividerItemDecoration.Companion.DividerDirection.Vertical)
+                    .dividerController(IgnoreGridLastRowVerticalDividerController(4))
+                    .build()
+            )
+
+```
+
+我的RecyclerView的分析就到这里了，我也不保证我的理解没有错，大家也可以和我一起讨论，大家共同提高，谢谢大家。
 
