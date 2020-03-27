@@ -1,4 +1,4 @@
-# Android中的触摸——MotionEvent的下发
+# Android中的触摸事件——MotionEvent的下发
 
 ## 前言
 

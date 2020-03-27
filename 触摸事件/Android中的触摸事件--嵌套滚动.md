@@ -1,0 +1,28 @@
+# Android中的触摸事件——嵌套滚动
+
+
+## 前言
+
+  相信绝大部分的Android开发者都遇到过嵌套滑动冲突的问题，后来Google官方也推出了许多解决嵌套滑动冲突的控件。最经典的就是NestedScrollView和RecyclerView。特别是NestedScrollView，他几乎完全取代了ScrollView。Google的这些嵌套滑动控件绝大部分都是通过实现`NestedScrollingChild3`和`NestedScrollingParent3`这两个接口来实现的。当我明白了他们对于嵌套滑动是如何实现的时候，脑袋中就直接冒出两个字——“妙啊”。下面的内容也是以分析NestedScrollView的代码来分析嵌套滑动的处理。  
+  
+  
+## 正文
+
+
+### NestedScrollingChild3和NestedScorllingParent3
+
+  就像它们的命名一样，NestedScrollingChild3就是那些需要能够滑动同时希望能够支持嵌套滑动的View实现的接口；NestedScrollingParent3就是能够处理Child中有嵌套滑动View的情况。可能描述有点抽象。这里举个例子：假如一个NestedScrollView中有一个RecyclerView，当RecyclerView滑动到底部的时候，再向上滑动，这个时候NestedScrollView就会滑动。在这个例子中RecyclerView就是Child（NestedScrollingChild3的简称，下文也一样），NestedScrollView就是Parent（NestedScrollingParent3的简称，下文也一样）。当Child滑动到底部的时候，再向上滑动就会通知Parent自己还在滑动但是没有办法消费这个滑动距离，然后让Parent来处理这个未消费的滑动距离，当然Parent也可以不处理，可以找它的Parent来处理，依次类推，可以一直向上找处理这个滑动距离的View。所以一个View即可以是Child也可以是Parent，NestedScrollView就同时实现了这两个接口。  
+  
+  1. NestedScrollingChild3#startNestedScroll
+
+  这个方法是滑动开始的时候会调用的方法，一般是ACTION\_DOWN的时候会调用这个方法，默认情况下，这个方法回去找实现了Parent接口的父View，如果找到了这个View然后就会调用Parent的onStartNestedScroll方法，如果这个方法返回true，表示父View接受了Child的嵌套滑动，Child这时就会把这个Parent保存下来，同时再调用Parent的onNestedScrollAccepted方法。总结一下就是：Child#startNestedScroll -> Parent#onStartNestedScroll -> Parent#onNestedScrollAccepted
+  
+  2. NestedScrollingChild3#dispatchNestedPreScroll
+  
+  在Child准备滑动之前会调用这个方法，然后再调用startNestedScroll过程中找到的Parent的onNestedPreScroll方法。这个过程做一个简单的比喻：就好比你想要买一个10000块的电脑，然后你要向老板申请，老板可以拒绝你的申请，也可以只让你买8000的，可能同意你买10000的。在这里你就是Child而老板就是Parent，10000就是Child想要滑动的距离。总结：Child#dispatchNestedPreScroll -> Parent#onNestedPreScroll
+  
+  3. NestedScrollingChild3#dispatchNestedScroll
+
+  当Child滑动完成后，会调用这个方法，然后调用Parent的onNestedScroll方法。这个过程中有可能Child自己并没有消费完这次的滑动距离，然后把这个没有消费完成的距离交给Parent处理，也就是在上面提到的例子。总结：Child#dispatchNestedScroll -> Parent#onNestedScroll
+  
+  4. 

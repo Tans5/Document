@@ -1,4 +1,4 @@
-# Android中的触摸——MotionEvent中的多点触控
+# Android中的触摸事件——MotionEvent中的多点触控
 
 ## 前言
   
