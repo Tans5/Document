@@ -303,4 +303,780 @@
   
   ```
   
-  这里简单总结下start的过程，Child调用startNestedScroll，这里会寻找一个Parent来处理这次嵌套滑动，Parent会通过调用onStartNestedScroll方法来确认是否（是否是垂直方向）接受这次滑动，如果接受这次滑动，Parent还会调用onNestedScrollAccepted方法同时又调用了自己的startNestedScroll方法（这时的Parent又作为一个Child去寻找它的parent来处理这次嵌套滑动，通俗点来说就是“套娃”，有很多这样的“套娃”操作，后面就不详说明了）。
+  这里简单总结下start的过程，Child调用startNestedScroll，这里会寻找一个Parent来处理这次嵌套滑动，Parent会通过调用onStartNestedScroll方法来确认是否（是否是垂直方向）接受这次滑动，如果接受这次滑动，Parent还会调用onNestedScrollAccepted方法同时又调用了自己的startNestedScroll方法（这时的Parent又作为一个Child去寻找它的parent来处理这次嵌套滑动，通俗点来说就是“套娃”，有很多这样的“套娃”操作，后面就不详说明了）。  
+  
+  
+  ```java
+  
+    
+    // NestedScrollView#stopNestedScroll
+    @Override
+    public void stopNestedScroll(int type) {
+        mChildHelper.stopNestedScroll(type);
+    }
+    
+    //NestedScrollingChildHelper#stopNestedScroll
+    /**
+     * Stop a nested scroll in progress.
+     *
+     * <p>This is a delegate method. Call it from your {@link android.view.View View} subclass
+     * method/{@link androidx.core.view.NestedScrollingChild2} interface method with the same
+     * signature to implement the standard policy.</p>
+     */
+    public void stopNestedScroll(@NestedScrollType int type) {
+        ViewParent parent = getNestedScrollingParentForType(type);
+        if (parent != null) {
+            // 调用Parent的onStopNestedScroll方法
+            ViewParentCompat.onStopNestedScroll(parent, mView, type);
+            // 清除在start过程中的parent
+            setNestedScrollingParentForType(type, null);
+        }
+    }
+    
+    // NestedScrollView#onStopNestedScroll
+    @Override
+    public void onStopNestedScroll(@NonNull View target, int type) {
+        
+        mParentHelper.onStopNestedScroll(target, type);
+        // 又是套娃操作，不多说了
+        stopNestedScroll(type);
+    }
+    
+    // NestedScrollingParentHelper
+    /**
+     * React to a nested scroll operation ending.
+     *
+     * <p>This is a delegate method. Call it from your {@link android.view.ViewGroup ViewGroup}
+     * subclass method/{@link androidx.core.view.NestedScrollingParent2} interface method with
+     * the same signature to implement the standard policy.</p>
+     */
+    public void onStopNestedScroll(@NonNull View target, @NestedScrollType int type) {
+        // 清除在accept过程中保存下来的Child的滑动方向。
+        if (type == ViewCompat.TYPE_NON_TOUCH) {
+            mNestedScrollAxesNonTouch = ViewGroup.SCROLL_AXIS_NONE;
+        } else {
+            mNestedScrollAxesTouch = ViewGroup.SCROLL_AXIS_NONE;
+        }
+    }
+  
+  ```
+  上面的stop过程很简单，这里不多说了。 
+  
+  下面分析重要的`onTouchEvent`方法，滑动的处理主要逻辑都是在这里完成的。 
+  
+  ```java
+  
+  
+    @Override
+    public boolean onTouchEvent(MotionEvent ev) {
+        
+        // 如果velocityTracker不存在，添加一个对象（用于惯性滑动的速度计算）。
+        initVelocityTrackerIfNotExists();
+
+        final int actionMasked = ev.getActionMasked();
+
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
+            mNestedYOffset = 0;
+        }
+		
+		 // clone一个MotionEvent用于速度计算
+        MotionEvent vtev = MotionEvent.obtain(ev);
+        vtev.offsetLocation(0, mNestedYOffset);
+
+        switch (actionMasked) {
+            case MotionEvent.ACTION_DOWN: {
+                if (getChildCount() == 0) {
+                    return false;
+                }
+                
+                // 如果滑动没有完成会先禁止parent对事件的拦截
+                if ((mIsBeingDragged = !mScroller.isFinished())) {
+                    final ViewParent parent = getParent();
+                    if (parent != null) {
+                        parent.requestDisallowInterceptTouchEvent(true);
+                    }
+                }
+
+                /*
+                 * If being flinged and user touches, stop the fling. isFinished
+                 * will be false if being flinged.
+                 */
+                // 如果滑动没有完成，停止滑动。
+                if (!mScroller.isFinished()) {
+                    abortAnimatedScroll();
+                }
+
+                // Remember where the motion event started
+                mLastMotionY = (int) ev.getY();
+                mActivePointerId = ev.getPointerId(0);
+                
+                // 开始嵌套滑动
+                startNestedScroll(ViewCompat.SCROLL_AXIS_VERTICAL, ViewCompat.TYPE_TOUCH);
+                break;
+            }
+            case MotionEvent.ACTION_MOVE:
+                final int activePointerIndex = ev.findPointerIndex(mActivePointerId);
+                if (activePointerIndex == -1) {
+                    Log.e(TAG, "Invalid pointerId=" + mActivePointerId + " in onTouchEvent");
+                    break;
+                }
+
+                final int y = (int) ev.getY(activePointerIndex);
+                int deltaY = mLastMotionY - y;
+                
+                // 如果没有被拖拽，同时滑动距离大于touchSlop，就会把状态设置为拖拽，禁止parent拦截事件
+                if (!mIsBeingDragged && Math.abs(deltaY) > mTouchSlop) {
+                    final ViewParent parent = getParent();
+                    if (parent != null) {
+                        parent.requestDisallowInterceptTouchEvent(true);
+                    }
+                    mIsBeingDragged = true;
+                    if (deltaY > 0) {
+                        deltaY -= mTouchSlop;
+                    } else {
+                        deltaY += mTouchSlop;
+                    }
+                }
+                
+                // 如果已经拖拽
+                if (mIsBeingDragged) {
+                    // Start with nested pre scrolling
+                    
+                    // 调用dispatchNestedPreScroll方法
+                    // delatY：想要滑动的垂直距离。
+                    // scrollConsumed：被Parent消费的距离
+                    // scrollOffset：当前View的位置位移的距离（这里举个例子：很多人都用过可以折叠的Toolbar吧
+                    // ，那种情况下，在滑动的时候就会改变当前View的位置）
+                    if (dispatchNestedPreScroll(0, deltaY, mScrollConsumed, mScrollOffset,
+                            ViewCompat.TYPE_TOUCH)) {
+                        // 减去parent消费的距离
+                        deltaY -= mScrollConsumed[1];
+                        // View的位移距离
+                        mNestedYOffset += mScrollOffset[1];
+                    }
+
+                    // Scroll to follow the motion event
+                    mLastMotionY = y - mScrollOffset[1];
+						
+						// 记录下当前的滑动位置，用于后面的实际滑动后的消费距离计算。
+                    final int oldY = getScrollY();
+                    // 在Y轴上可以滑动的最大距离，最小为0
+                    final int range = getScrollRange();
+                    
+                    // 滑动到边界的处理模式，相信很多人在XML的属性里面见过。
+                    final int overscrollMode = getOverScrollMode();
+                    boolean canOverscroll = overscrollMode == View.OVER_SCROLL_ALWAYS
+                            || (overscrollMode == View.OVER_SCROLL_IF_CONTENT_SCROLLS && range > 0);
+
+                    // Calling overScrollByCompat will call onOverScrolled, which
+                    // calls onScrollChanged if applicable.
+                    // overScrollByCompat这个方法里面处理实际滑动，当滑动到边界时会返回true，这时会把
+                    // velocityTracker清空。
+                    if (overScrollByCompat(0, deltaY, 0, getScrollY(), 0, range, 0,
+                            0, true) && !hasNestedScrollingParent(ViewCompat.TYPE_TOUCH)) {
+                        // Break our velocity if we hit a scroll barrier.
+                        mVelocityTracker.clear();
+                    }
+						
+						// 实际滑动消费的距离
+                    final int scrolledDeltaY = getScrollY() - oldY;
+                    // 没有消费的距离
+                    final int unconsumedY = deltaY - scrolledDeltaY;
+
+                    mScrollConsumed[1] = 0;
+
+						// 把没有消费的距离交给Parent，就是我们上面提到过的嵌套滑动的例子。 
+                    dispatchNestedScroll(0, scrolledDeltaY, 0, unconsumedY, mScrollOffset,
+                            ViewCompat.TYPE_TOUCH, mScrollConsumed);
+
+                    mLastMotionY -= mScrollOffset[1];
+                    mNestedYOffset += mScrollOffset[1];
+						
+						// 这下面的代码就是处理滑动到边界时的气泡一样的UI，主要用到了EdgeEffect这个类完成计算和
+						// 绘制，在draw方法里面有具体的绘制代码。
+                    if (canOverscroll) {
+                        deltaY -= mScrollConsumed[1];
+                        ensureGlows();
+                        final int pulledToY = oldY + deltaY;
+                        if (pulledToY < 0) {
+                            EdgeEffectCompat.onPull(mEdgeGlowTop, (float) deltaY / getHeight(),
+                                    ev.getX(activePointerIndex) / getWidth());
+                            if (!mEdgeGlowBottom.isFinished()) {
+                                mEdgeGlowBottom.onRelease();
+                            }
+                        } else if (pulledToY > range) {
+                            EdgeEffectCompat.onPull(mEdgeGlowBottom, (float) deltaY / getHeight(),
+                                    1.f - ev.getX(activePointerIndex)
+                                            / getWidth());
+                            if (!mEdgeGlowTop.isFinished()) {
+                                mEdgeGlowTop.onRelease();
+                            }
+                        }
+                        if (mEdgeGlowTop != null
+                                && (!mEdgeGlowTop.isFinished() || !mEdgeGlowBottom.isFinished())) {
+                            ViewCompat.postInvalidateOnAnimation(this);
+                        }
+                    }
+                }
+                break;
+            case MotionEvent.ACTION_UP:
+                // 计算速度
+                final VelocityTracker velocityTracker = mVelocityTracker;
+                velocityTracker.computeCurrentVelocity(1000, mMaximumVelocity);
+                int initialVelocity = (int) velocityTracker.getYVelocity(mActivePointerId);
+                
+                // 当滑动的速度大于minVelocity时
+                if ((Math.abs(initialVelocity) >= mMinimumVelocity)) {
+                    // 如果这次惯性滑动没有被Parent消费，那么自己消费
+                    if (!dispatchNestedPreFling(0, -initialVelocity)) {
+                        dispatchNestedFling(0, -initialVelocity, true);
+                        
+                        // 处理惯性滚动的方法
+                        fling(-initialVelocity);
+                    }
+                } else if (mScroller.springBack(getScrollX(), getScrollY(), 0, 0, 0,
+                        getScrollRange())) {
+                    ViewCompat.postInvalidateOnAnimation(this);
+                }
+                mActivePointerId = INVALID_POINTER;
+                
+                // 结束滑动，并初始化一些状态
+                endDrag();
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                // 和ACTION_UP相比，去掉了惯性滑动的代码
+                if (mIsBeingDragged && getChildCount() > 0) {
+                    if (mScroller.springBack(getScrollX(), getScrollY(), 0, 0, 0,
+                            getScrollRange())) {
+                        ViewCompat.postInvalidateOnAnimation(this);
+                    }
+                }
+                mActivePointerId = INVALID_POINTER;
+                endDrag();
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                // 多点触控的处理，和我之前分析RecyclerView中的多点触控的处理方式一样。
+                // 当有新的触摸点添加到屏幕上的时候，新添加的触摸点接管滑动。 
+                final int index = ev.getActionIndex();
+                mLastMotionY = (int) ev.getY(index);
+                mActivePointerId = ev.getPointerId(index);
+                break;
+            }
+            case MotionEvent.ACTION_POINTER_UP:
+                // 多点触控处理
+                // 当有触摸点离开时：选择index为0的触摸点，如果离开的是index为0的触摸点，就选择
+                // index为1的。
+                onSecondaryPointerUp(ev);
+                mLastMotionY = (int) ev.getY(ev.findPointerIndex(mActivePointerId));
+                break;
+        }
+		 
+		 // 将event添加到velocityTracker用户速度计算
+        if (mVelocityTracker != null) {
+            mVelocityTracker.addMovement(vtev);
+        }
+        vtev.recycle();
+
+        return true;
+    }
+
+  
+    // UP 和 CANCEL 的时候重置一些状态。
+    private void endDrag() {
+        mIsBeingDragged = false;
+
+        recycleVelocityTracker();
+        stopNestedScroll(ViewCompat.TYPE_TOUCH);
+
+        if (mEdgeGlowTop != null) {
+            mEdgeGlowTop.onRelease();
+            mEdgeGlowBottom.onRelease();
+        }
+    }
+ 
+  
+  ```
+  
+  上面就是滑动的主要代码和逻辑，这里简单总结一下：1. 首先在ACTION\_DOWN的时候：如果scroller还没有完成，禁止parent的拦截，停止scroller没有完成的滑动，开始一次新的滑动。 2. ACTION\_MOVE：如果确定滑动：禁止parent拦截事件；调用dispatchPreNestedScroll方法，如果parent有消费距离，dy还会再减去parent消费的距离，进行实际的滑动，实际滑动后还会调用dispatchNestedScroll方法将本次滑动的距离和没有消费的距离传个parent， 如果滑动到边界，再处理滑动的气泡UI。3. ACTION\_UP: 计算本次滑动事件的速度，然后交给scroller处理这次快速滑动，同时重置一些状态。
+  
+  
+  下面贴出dispatchNestedPreScroll、dispatchNestedScroll、dispatchNestedPreFling和dispatchNestedFling代码。  
+  
+  ```java
+  
+  	 // NestedScrollView#dispatchNestedPreScroll
+    @Override
+    public boolean dispatchNestedPreScroll(int dx, int dy, int[] consumed, int[] offsetInWindow,
+            int type) {
+        return mChildHelper.dispatchNestedPreScroll(dx, dy, consumed, offsetInWindow, type);
+    }
+    
+    // NestedScrollingChildHelper#dispatchNestedPreScroll
+    /**
+     * Dispatch one step of a nested pre-scrolling operation to the current nested scrolling parent.
+     *
+     * <p>This is a delegate method. Call it from your {@link android.view.View View} subclass
+     * method/{@link androidx.core.view.NestedScrollingChild2} interface method with the same
+     * signature to implement the standard policy.</p>
+     *
+     * @return true if the parent consumed any of the nested scroll
+     */
+    public boolean dispatchNestedPreScroll(int dx, int dy, @Nullable int[] consumed,
+            @Nullable int[] offsetInWindow, @NestedScrollType int type) {
+        if (isNestedScrollingEnabled()) {
+            final ViewParent parent = getNestedScrollingParentForType(type);
+            if (parent == null) {
+                return false;
+            }
+
+            if (dx != 0 || dy != 0) {
+                int startX = 0;
+                int startY = 0;
+                if (offsetInWindow != null) {
+                    mView.getLocationInWindow(offsetInWindow);
+                    startX = offsetInWindow[0];
+                    startY = offsetInWindow[1];
+                }
+
+                if (consumed == null) {
+                    consumed = getTempNestedScrollConsumed();
+                }
+                consumed[0] = 0;
+                consumed[1] = 0;
+                ViewParentCompat.onNestedPreScroll(parent, mView, dx, dy, consumed, type);
+
+                if (offsetInWindow != null) {
+                    mView.getLocationInWindow(offsetInWindow);
+                    offsetInWindow[0] -= startX;
+                    offsetInWindow[1] -= startY;
+                }
+                return consumed[0] != 0 || consumed[1] != 0;
+            } else if (offsetInWindow != null) {
+                offsetInWindow[0] = 0;
+                offsetInWindow[1] = 0;
+            }
+        }
+        return false;
+    }
+  	
+  	// NestedScrollView#onNestedPreScroll
+  	
+    @Override
+    public void onNestedPreScroll(@NonNull View target, int dx, int dy, @NonNull int[] consumed,
+            int type) {
+        // 这里又是套娃操作。
+        dispatchNestedPreScroll(dx, dy, consumed, null, type);
+    }
+  	
+  
+  ```
+  
+  
+  dispatchNestedPreScroll逻辑很简单，就不多说了，最后也有套娃操作。   
+  
+  
+  ```java
+  
+  	
+  	 // NestedScrollView#dispatchNestedScroll
+    @Override
+    public boolean dispatchNestedScroll(int dxConsumed, int dyConsumed, int dxUnconsumed,
+            int dyUnconsumed, int[] offsetInWindow) {
+        return mChildHelper.dispatchNestedScroll(dxConsumed, dyConsumed, dxUnconsumed, dyUnconsumed,
+                offsetInWindow);
+    }
+    
+    // NestedScrollingChildHelper#dispatchNestedScroll
+    /**
+     * Dispatch one step of a nested scrolling operation to the current nested scrolling parent.
+     *
+     * <p>This is a delegate method. Call it from your {@link android.view.View View} subclass
+     * method/{@link androidx.core.view.NestedScrollingChild} interface method with the same
+     * signature to implement the standard policy.</p>
+     *
+     * @return <code>true</code> if the parent consumed any of the nested scroll distance
+     */
+    public boolean dispatchNestedScroll(int dxConsumed, int dyConsumed,
+            int dxUnconsumed, int dyUnconsumed, @Nullable int[] offsetInWindow) {
+        return dispatchNestedScrollInternal(dxConsumed, dyConsumed, dxUnconsumed, dyUnconsumed,
+                offsetInWindow, TYPE_TOUCH, null);
+    }
+	
+	
+	// NestedScrollingChildHelper#dispatchNestedScrollInternal
+    private boolean dispatchNestedScrollInternal(int dxConsumed, int dyConsumed,
+            int dxUnconsumed, int dyUnconsumed, @Nullable int[] offsetInWindow,
+            @NestedScrollType int type, @Nullable int[] consumed) {
+        if (isNestedScrollingEnabled()) {
+            final ViewParent parent = getNestedScrollingParentForType(type);
+            if (parent == null) {
+                return false;
+            }
+
+            if (dxConsumed != 0 || dyConsumed != 0 || dxUnconsumed != 0 || dyUnconsumed != 0) {
+                int startX = 0;
+                int startY = 0;
+                if (offsetInWindow != null) {
+                    mView.getLocationInWindow(offsetInWindow);
+                    startX = offsetInWindow[0];
+                    startY = offsetInWindow[1];
+                }
+
+                if (consumed == null) {
+                    consumed = getTempNestedScrollConsumed();
+                    consumed[0] = 0;
+                    consumed[1] = 0;
+                }
+
+                ViewParentCompat.onNestedScroll(parent, mView,
+                        dxConsumed, dyConsumed, dxUnconsumed, dyUnconsumed, type, consumed);
+
+                if (offsetInWindow != null) {
+                    mView.getLocationInWindow(offsetInWindow);
+                    offsetInWindow[0] -= startX;
+                    offsetInWindow[1] -= startY;
+                }
+                return true;
+            } else if (offsetInWindow != null) {
+                // No motion, no dispatch. Keep offsetInWindow up to date.
+                offsetInWindow[0] = 0;
+                offsetInWindow[1] = 0;
+            }
+        }
+        return false;
+    }
+    
+    // NestedScrollView#onNestedScroll
+    
+    @Override
+    public void onNestedScroll(@NonNull View target, int dxConsumed, int dyConsumed,
+            int dxUnconsumed, int dyUnconsumed) {
+        onNestedScrollInternal(dyUnconsumed, ViewCompat.TYPE_TOUCH, null);
+    }
+	
+	// 这里需要注意了，这里不仅仅是进行了套娃操作
+	private void onNestedScrollInternal(int dyUnconsumed, int type, @Nullable int[] consumed) {
+        final int oldScrollY = getScrollY();
+        // 消费Child没有消费的距离
+        scrollBy(0, dyUnconsumed);
+        final int myConsumed = getScrollY() - oldScrollY;
+
+        if (consumed != null) {
+            consumed[1] += myConsumed;
+        }
+        final int myUnconsumed = dyUnconsumed - myConsumed;
+		
+		 // 套娃操作
+        mChildHelper.dispatchNestedScroll(0, myConsumed, 0, myUnconsumed, null, type, consumed);
+    }
+  
+  ```
+  
+  在NestedScrollView的onNestedScroll方法中，如果对Child没有消费的距离进行了处理。  
+  
+  
+  到这里在NestedScrollView中的嵌套滑动处理的代码都分析完了，Child中调用startXXXXX, stopXXXXX, dispatchXXXX等方法，最后这些方法会调用接受处理的Parent中的onXXXX方法，如果这个Parent也是作为一个Child，还会继续套娃操作，继续调用上面Child对应的方法。这里补充说明下，在`CoordinatorLayout`中它又会把Parent中的onXXXX方法全部交给`Behavior`处理，`Behavior`要处理的事情实在有点多，它可能会处理滑动过程，可能会处理Layout过程。如果有人想要分析`Behavior`，这是一个重要的突破口。  
+  
+  下面的代码简单分析下NestedScrollView中真实滑动相关的代码。
+  
+  ```java
+  
+  	 
+  	 // 下面是绘制气泡的代码算法，主要都是EdgeEffect这个对象处理了，还是很简单的。不多描述了。
+    @Override
+    public void draw(Canvas canvas) {
+        super.draw(canvas);
+        if (mEdgeGlowTop != null) {
+            final int scrollY = getScrollY();
+            if (!mEdgeGlowTop.isFinished()) {
+                final int restoreCount = canvas.save();
+                int width = getWidth();
+                int height = getHeight();
+                int xTranslation = 0;
+                int yTranslation = Math.min(0, scrollY);
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP || getClipToPadding()) {
+                    width -= getPaddingLeft() + getPaddingRight();
+                    xTranslation += getPaddingLeft();
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && getClipToPadding()) {
+                    height -= getPaddingTop() + getPaddingBottom();
+                    yTranslation += getPaddingTop();
+                }
+                canvas.translate(xTranslation, yTranslation);
+                mEdgeGlowTop.setSize(width, height);
+                if (mEdgeGlowTop.draw(canvas)) {
+                    ViewCompat.postInvalidateOnAnimation(this);
+                }
+                canvas.restoreToCount(restoreCount);
+            }
+            if (!mEdgeGlowBottom.isFinished()) {
+                final int restoreCount = canvas.save();
+                int width = getWidth();
+                int height = getHeight();
+                int xTranslation = 0;
+                int yTranslation = Math.max(getScrollRange(), scrollY) + height;
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP || getClipToPadding()) {
+                    width -= getPaddingLeft() + getPaddingRight();
+                    xTranslation += getPaddingLeft();
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && getClipToPadding()) {
+                    height -= getPaddingTop() + getPaddingBottom();
+                    yTranslation -= getPaddingBottom();
+                }
+                canvas.translate(xTranslation - width, yTranslation);
+                canvas.rotate(180, width, 0);
+                mEdgeGlowBottom.setSize(width, height);
+                if (mEdgeGlowBottom.draw(canvas)) {
+                    ViewCompat.postInvalidateOnAnimation(this);
+                }
+                canvas.restoreToCount(restoreCount);
+            }
+        }
+    }
+  
+  
+  ```
+  
+  上面绘制气泡的算法还是不难，这里不详细分析了。  
+  
+  ```java 
+  
+  	// 这个方法中还支持水平滑动，然而实际的代码中并没有水平滑动的代码。
+    boolean overScrollByCompat(int deltaX, int deltaY,
+            int scrollX, int scrollY,
+            int scrollRangeX, int scrollRangeY,
+            int maxOverScrollX, int maxOverScrollY,
+            boolean isTouchEvent) {
+        final int overScrollMode = getOverScrollMode();
+        final boolean canScrollHorizontal =
+                computeHorizontalScrollRange() > computeHorizontalScrollExtent();
+        final boolean canScrollVertical =
+                computeVerticalScrollRange() > computeVerticalScrollExtent();
+        final boolean overScrollHorizontal = overScrollMode == View.OVER_SCROLL_ALWAYS
+                || (overScrollMode == View.OVER_SCROLL_IF_CONTENT_SCROLLS && canScrollHorizontal);
+        final boolean overScrollVertical = overScrollMode == View.OVER_SCROLL_ALWAYS
+                || (overScrollMode == View.OVER_SCROLL_IF_CONTENT_SCROLLS && canScrollVertical);
+			
+        int newScrollX = scrollX + deltaX;
+        if (!overScrollHorizontal) {
+            maxOverScrollX = 0;
+        }
+		 
+		 // 希望滑动到的最终位置
+        int newScrollY = scrollY + deltaY;
+        // 当不支持OverScroll的时候最大的OverScroll值为0
+        if (!overScrollVertical) {
+            maxOverScrollY = 0;
+        }
+
+        // Clamp values if at the limits and record
+        final int left = -maxOverScrollX;
+        final int right = maxOverScrollX + scrollRangeX;
+        final int top = -maxOverScrollY;
+        final int bottom = maxOverScrollY + scrollRangeY;
+
+        boolean clampedX = false;
+        if (newScrollX > right) {
+            newScrollX = right;
+            clampedX = true;
+        } else if (newScrollX < left) {
+            newScrollX = left;
+            clampedX = true;
+        }
+
+        boolean clampedY = false;
+        //当滑动的最终的位置大于child的bottom时，最终滑动位置设置为bottom
+        if (newScrollY > bottom) {
+            newScrollY = bottom;
+            clampedY = true;
+        } else if (newScrollY < top) {
+        	  // 当最终位置小于child的top时，将滑动最终位置设置为top。
+            newScrollY = top;
+            clampedY = true;
+        }
+
+        if (clampedY && !hasNestedScrollingParent(ViewCompat.TYPE_NON_TOUCH)) {
+            mScroller.springBack(newScrollX, newScrollY, 0, 0, 0, getScrollRange());
+        }
+
+        onOverScrolled(newScrollX, newScrollY, clampedX, clampedY);
+
+        return clampedX || clampedY;
+    }
+    
+    // 直接调用scrollTo方法完成滑动
+    @Override
+    protected void onOverScrolled(int scrollX, int scrollY,
+            boolean clampedX, boolean clampedY) {
+        super.scrollTo(scrollX, scrollY);
+    }
+
+  
+  ```
+  
+  当调用overScrollByCompat返回为true时，表示已经滑到边界。  
+    
+  ```java
+  
+  
+    /**
+     * Fling the scroll view
+     *
+     * @param velocityY The initial velocity in the Y direction. Positive
+     *                  numbers mean that the finger/cursor is moving down the screen,
+     *                  which means we want to scroll towards the top.
+     */
+    public void fling(int velocityY) {
+        if (getChildCount() > 0) {
+
+            mScroller.fling(getScrollX(), getScrollY(), // start
+                    0, velocityY, // velocities
+                    0, 0, // x
+                    Integer.MIN_VALUE, Integer.MAX_VALUE, // y
+                    0, 0); // overscroll
+            runAnimatedScroll(true);
+        }
+    }
+    
+    
+    private void runAnimatedScroll(boolean participateInNestedScrolling) {
+        if (participateInNestedScrolling) {
+        	  // 开始滑动
+            startNestedScroll(ViewCompat.SCROLL_AXIS_VERTICAL, ViewCompat.TYPE_NON_TOUCH);
+        } else {
+            stopNestedScroll(ViewCompat.TYPE_NON_TOUCH);
+        }
+        // 记录上次滑动的位置
+        mLastScrollerY = getScrollY();
+        // 请求View重新绘制
+        ViewCompat.postInvalidateOnAnimation(this);
+    }
+    
+    // 当重新绘制时会调用这个方法来请求scroll位置的计算。
+    @Override
+    public void computeScroll() {
+		
+		 // 如果滑动已经完成，直接返回。 
+        if (mScroller.isFinished()) {
+            return;
+        }
+
+		 // 计算滑动位置
+        mScroller.computeScrollOffset();
+        
+        // 计算出来的y的位置
+        final int y = mScroller.getCurrY();
+        // dY
+        int unconsumed = y - mLastScrollerY;
+        mLastScrollerY = y;
+
+        // Nested Scrolling Pre Pass
+        mScrollConsumed[1] = 0;
+        // 提前告诉Parent自己要滑动了，注意这里的type是NON_TOUCH
+        dispatchNestedPreScroll(0, unconsumed, mScrollConsumed, null,
+                ViewCompat.TYPE_NON_TOUCH);
+        
+        // 减去被Parent消费的距离
+        unconsumed -= mScrollConsumed[1];
+
+        final int range = getScrollRange();
+
+        if (unconsumed != 0) {
+            // Internal Scroll
+            final int oldScrollY = getScrollY();
+            // 调用滑动代码。
+            overScrollByCompat(0, unconsumed, getScrollX(), oldScrollY, 0, range, 0, 0, false);
+            
+            // 已经滑动的距离
+            final int scrolledByMe = getScrollY() - oldScrollY;
+            unconsumed -= scrolledByMe;
+
+            // Nested Scrolling Post Pass
+            mScrollConsumed[1] = 0;
+            
+            // 给Parent处理未滑动的距离。
+            dispatchNestedScroll(0, scrolledByMe, 0, unconsumed, mScrollOffset,
+                    ViewCompat.TYPE_NON_TOUCH, mScrollConsumed);
+            unconsumed -= mScrollConsumed[1];
+        }
+		 
+		 // 如果滑动到边界
+        if (unconsumed != 0) {
+            final int mode = getOverScrollMode();
+            final boolean canOverscroll = mode == OVER_SCROLL_ALWAYS
+                    || (mode == OVER_SCROLL_IF_CONTENT_SCROLLS && range > 0);
+            
+           
+            if (canOverscroll) {
+                ensureGlows();
+                
+                // 处理滑动气泡动画
+                if (unconsumed < 0) {
+                    if (mEdgeGlowTop.isFinished()) {
+                        mEdgeGlowTop.onAbsorb((int) mScroller.getCurrVelocity());
+                    }
+                } else {
+                    if (mEdgeGlowBottom.isFinished()) {
+                        mEdgeGlowBottom.onAbsorb((int) mScroller.getCurrVelocity());
+                    }
+                }
+            }
+            // 停止滑动
+            abortAnimatedScroll();
+        }
+		  
+		 // 如果嵌套滑动没有结束，请求View刷新，计算下一帧滑动位置。 
+        if (!mScroller.isFinished()) {
+            ViewCompat.postInvalidateOnAnimation(this);
+        } else {
+            // 结束这次嵌套滑动。
+            stopNestedScroll(ViewCompat.TYPE_NON_TOUCH);
+        }
+    }
+    
+    private void abortAnimatedScroll() {
+        mScroller.abortAnimation();
+        stopNestedScroll(ViewCompat.TYPE_NON_TOUCH);
+    }
+  
+  ```
+  
+  在嵌套滑动中startNestedScroll和stopNestedScroll这两个方法中总是成对出现，又开始就有结束嘛。fling代码也还是比较简单，前面讲Scroller也有说过，scroller只是负责计算，真实的滑动也还是和onTouchEvent中一样，都是调用的overScrollByCompat方法。上面代码我相信对于你们也没有压力。  
+  
+  
+  One More Thing， 由于NestedScrollView是继承于FrameLayout，默认在测量子View的时候，子View的最大高度是没有办法超过Parent的高度的，如果都没有办法超过Parent，那怎么滑动？所以必须重写measureChild方法
+  
+  ```java
+  
+  
+    @Override
+    protected void measureChild(View child, int parentWidthMeasureSpec,
+            int parentHeightMeasureSpec) {
+        ViewGroup.LayoutParams lp = child.getLayoutParams();
+
+        int childWidthMeasureSpec;
+        int childHeightMeasureSpec;
+
+        childWidthMeasureSpec = getChildMeasureSpec(parentWidthMeasureSpec, getPaddingLeft()
+                + getPaddingRight(), lp.width);
+
+		 // 不限制Child的高度。 
+        childHeightMeasureSpec = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+
+        child.measure(childWidthMeasureSpec, childHeightMeasureSpec);
+    }
+  
+  
+  ```
+  
+  
+  Emmmmmm,到这里NestedScrollView的嵌套滚动的源码分析也就完成了，NestedScrollView什么都好，但是不支持水平方向上的嵌套滑动。所以我自己又写了一个支持水平方向上的嵌套滚动View--[HorizontalNestedScrollView](https://github.com/Tans5/HorizontalNestedScrollView/blob/master/horizontalnestedscrollview/src/main/java/com/tans/horizontalnestedscrollview/HorizontalNestedScrollView.kt)。算法基本和NestedScrollView差不多。 
+  
+  ![](HorizontalNestedScrollView.gif)
+  
+  
+ <br>
+ <br>
+ <br>
+ <br>
+ 前面也提到了，Behavior也会影响嵌套滑动，如果有时间再做一篇关于Behavior相关的文章吧。  
