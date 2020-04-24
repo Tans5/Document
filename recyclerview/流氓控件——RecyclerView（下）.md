@@ -13,7 +13,7 @@
 
 ![](recyclerview.png)  
 
-上面的图是从Start向End layout的情况，End到Start layout我就不再给图了，自己想象。
+上面的图是从Start向End layout的情况，End到Start layout我就不再给图了，自己想象(上面的图片有点小问题，应该删除掉coordinate)。
 
 先看两个重要的成员变量类，AnchorInfo和LayoutState。
 
@@ -27,7 +27,7 @@ static class AnchorInfo {
         OrientationHelper mOrientationHelper;
         // 下次Layout需要的Position
         int mPosition;
-        // layout的坐标，见上面的图你就明白了。
+        // layout的锚点，从那个位置开始Layout
         int mCoordinate;
         // Layout的方向start to end 或者 end to start
         boolean mLayoutFromEnd;
@@ -61,7 +61,7 @@ static class AnchorInfo {
         /**
          * Number of pixels that we should fill, in the layout direction.
          */
-         // 见上图描述。
+         // 在给定的Layout方向上，剩余可以填充子View的空间。 
         int mAvailable;
 
         /**
@@ -74,14 +74,14 @@ static class AnchorInfo {
          * Defines the direction in which the data adapter is traversed.
          * Should be {@link #ITEM_DIRECTION_HEAD} or {@link #ITEM_DIRECTION_TAIL}
          */
-         // 从adapter中取数据的方向。
+         // 从adapter中取数据的方向，正常情况下我们都是TAIL方向。
         int mItemDirection;
 
         /**
          * Defines the direction in which the layout is filled.
          * Should be {@link #LAYOUT_START} or {@link #LAYOUT_END}
          */
-         // Layout的方向。
+         // Layout的方向，执行一次layoutChildren流程这个两个方向都会进行Layout。
         int mLayoutDirection;
 
         /**
@@ -127,13 +127,13 @@ static class AnchorInfo {
          * When LLM needs to layout particular views, it sets this list in which case, LayoutState
          * will only return views from this list and return null if it cannot find an item.
          */
-         // 和Recycler中的scrapList差不多，Recycler中还会看到它，就是上次Layout中的子View会被detached后放到这个list中
+         // 和Recycler中的scrapList差不多，Recycler中还会看到它，就是上次Layout中的子View会被detached后放到这个list中，但是layoutChildren流程结束后，通常这个list是会被清除的。
         List<RecyclerView.ViewHolder> mScrapList = null;
 
         /**
          * Used when there is no limit in how many views can be laid out.
          */
-         // 在Layout中是否可以无视available中的值无限layout，直到adapter中的item全部layout。
+         // 在Layout中是否可以无视available中的值无限layout，直到adapter中的item全部layout。也就是说取消recycler功能。
         boolean mInfinite;
         
         ...
@@ -164,7 +164,7 @@ static class AnchorInfo {
         
         /**
           * 我暂时把LayoutChildren分为两部分。第一部分为初始化AnchorInfo，初始化AnchorInfo又有两种方法，一种是通过
-          * paddingSavedState，这个State是在LayoutManager意外销毁的时候会通过LayoutState保存起来的，恢复的时候又会恢
+          * pendingSavedState，这个State是在LayoutManager意外销毁的时候会通过LayoutState保存起来的，恢复的时候又会恢
           * 复padding这个对象，如果你是个有经验的开发者，这种操作应该见得很多了，个人认为这个东西不太好用。还有一种方法是通
           * 过当前的子View状态来初始化AnchorInfo。第二部分为通过AnchorInfo然后初始化LayoutState，然后执行Layout操作。
           *
